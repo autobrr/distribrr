@@ -1,0 +1,43 @@
+http:
+  host: 0.0.0.0
+  port: 7430
+  token: MY_SECRET_TOKEN
+
+agent:
+  nodeName: test-node1
+  clientAddr: http://localhost:7430
+  annotations:
+    - hetzner
+    - ssd
+  labels:
+    - speed=1g
+
+manager:
+  addr: http://localhost:7422
+  token: MY_SECRET_TOKEN
+
+clients:
+  qbittorrent:
+    type: qbittorrent
+    host: http://localhost:4780
+    user: user
+    pass: pass
+    paths:
+      - /home/user/torrents
+    rules:
+      storage:
+        - path: /home/user/torrents
+          tier: 0
+          minFree: 50GB
+          maxUsage: 1200GB
+
+        - path: /mnt/data/torrents
+          tier: 1
+          minFree: 50GB
+
+      torrents:
+        maxActiveDownloads: 3
+        maxTotalDownloads: 3
+        maxTotalTorrents: 100
+
+      maxActiveDownloads: 3
