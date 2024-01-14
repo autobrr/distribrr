@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/autobrr/distribrr/pkg/version"
+	"github.com/rs/xid"
 	"net/http"
 	"net/url"
 	"time"
@@ -13,7 +15,6 @@ import (
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog/log"
 )
 
 const DefaultTimeout = 15 * time.Second
@@ -52,15 +53,10 @@ func (c *Client) getStats(ctx context.Context) (*stats.Stats, error) {
 		return nil, errors.Wrapf(err, "could not build URL: %s", c.name)
 	}
 
-	log.Trace().Msgf("getstats url: %s", reqUrl)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not create request for node: %s", c.name)
 	}
-
-	//req.Header.Add("Authorization", c.token)
-	//req.Header.Add("User-Agent", "distribrr-server")
 
 	c.setHeaders(ctx, req)
 
@@ -93,25 +89,17 @@ func (c *Client) startTask(ctx context.Context, te *task.Event) error {
 		return errors.Wrapf(err, "could not build URL: %s", c.name)
 	}
 
-	log.Trace().Msgf("start task url: %s", reqUrl)
-
 	body, err := json.Marshal(te)
 	if err != nil {
 		return errors.Wrapf(err, "could not marshal request for node: %s", c.name)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqUrl, bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqUrl.String(), bytes.NewBuffer(body))
 	if err != nil {
 		return errors.Wrapf(err, "could not create request for node: %s", c.name)
 	}
 
 	c.setHeaders(ctx, req)
-	//req.Header.Add("Authorization", c.token)
-	//req.Header.Add("User-Agent", "distribrr-server")
-	//
-	//if cid := ctx.Value("correlation_id").(string); cid != "" {
-	//	req.Header.Add("X-Correlation-ID", cid)
-	//}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -129,10 +117,15 @@ func (c *Client) startTask(ctx context.Context, te *task.Event) error {
 
 func (c *Client) setHeaders(ctx context.Context, req *http.Request) {
 	req.Header.Add("Authorization", c.token)
-	req.Header.Add("User-Agent", "distribrr-server")
+	req.Header.Add("User-Agent", "distribrr-server-"+version.Version)
 
-	if cid := ctx.Value("correlation_id").(string); cid != "" {
-		req.Header.Add("X-Correlation-ID", cid)
+	if ctx != nil {
+		if id := ctx.Value("correlation_id"); id != nil {
+			if id == "" {
+				id = xid.New().String()
+			}
+			req.Header.Add("X-Correlation-ID", id.(string))
+		}
 	}
 }
 
@@ -146,7 +139,7 @@ type DownloadRequest struct {
 	Opts        map[string]string `json:"opts"`
 }
 
-func (c *Client) buildUrl(addr string, endpoint string, params map[string]string) (string, error) {
+func (c *Client) buildUrl(addr string, endpoint string, params map[string]string) (*url.URL, error) {
 	apiBase := "/api/v1/"
 
 	// add query params
@@ -157,16 +150,15 @@ func (c *Client) buildUrl(addr string, endpoint string, params map[string]string
 
 	joinedUrl, err := url.JoinPath(addr, apiBase, endpoint)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	parsedUrl, err := url.Parse(joinedUrl)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	parsedUrl.RawQuery = queryParams.Encode()
 
-	// make into new string and return
-	return parsedUrl.String(), nil
+	return parsedUrl, nil
 }

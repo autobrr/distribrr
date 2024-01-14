@@ -77,10 +77,6 @@ func (s *APIServer) Handler() http.Handler {
 					req.Token = token
 				}
 
-				l := log.Ctx(r.Context())
-
-				l.Trace().Msgf("node register: req %+v", req)
-
 				if err := s.service.OnRegister(r.Context(), req); err != nil {
 					render.Status(r, http.StatusInternalServerError)
 					return
@@ -98,14 +94,12 @@ func (s *APIServer) Handler() http.Handler {
 					return
 				}
 
-				log.Trace().Msgf("node deregister: req %+v", req)
-
-				if err := s.service.Deregister(req); err != nil {
+				if err := s.service.Deregister(r.Context(), req); err != nil {
 					render.Status(r, http.StatusInternalServerError)
 					return
 				}
 
-				render.Status(r, http.StatusCreated)
+				render.Status(r, http.StatusOK)
 				render.PlainText(w, r, "OK")
 			})
 		})
@@ -121,18 +115,6 @@ func (s *APIServer) Handler() http.Handler {
 					return
 				}
 
-				//req.Opts = map[string]string{}
-				//if req.Category != "" {
-				//	req.Opts["category"] = req.Category
-				//}
-				//
-				//if req.Tags != "" {
-				//	req.Opts["tags"] = req.Tags
-				//}
-
-				//te := task.NewEvent()
-				//te.Task = t
-
 				ctx := context.WithoutCancel(r.Context())
 
 				s.service.AddTask(ctx, te)
@@ -141,47 +123,24 @@ func (s *APIServer) Handler() http.Handler {
 			})
 
 			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-				//l := zerolog.Ctx(r.Context())
-				//l.Info().Msg("get tasks")
-				getTasksHandler(r.Context())
+				if err := getTasksHandler(r.Context()); err != nil {
+					render.Status(r, http.StatusInternalServerError)
+					return
+				}
+
 				render.PlainText(w, r, "get tasks")
 				render.Status(r, http.StatusOK)
 				return
 			})
 		})
-
-		//r.Post("/schedule", func(w http.ResponseWriter, r *http.Request) {
-		//	req := ScheduleDownloadRequest{}
-		//
-		//	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		//		render.Status(r, http.StatusInternalServerError)
-		//		return
-		//	}
-		//
-		//	req.Opts = map[string]string{}
-		//	if req.Category != "" {
-		//		req.Opts["category"] = req.Category
-		//	}
-		//
-		//	if req.Tags != "" {
-		//		req.Opts["tags"] = req.Tags
-		//	}
-		//
-		//	if err := s.service.ScheduleDownload(r.Context(), req); err != nil {
-		//		render.Status(r, http.StatusInternalServerError)
-		//		return
-		//	}
-		//
-		//	render.Status(r, http.StatusOK)
-		//})
 	})
 
 	return r
 }
 
 func getTasksHandler(ctx context.Context) error {
-	//time.Sleep(3 * time.Second)
 	l := zerolog.Ctx(ctx)
 	l.Info().Msg("get tasks")
+
 	return nil
 }

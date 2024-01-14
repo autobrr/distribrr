@@ -1,24 +1,17 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
+	"github.com/autobrr/distribrr/pkg/server/client"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/autobrr/distribrr/pkg/diskusage"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/autobrr/go-qbittorrent"
-	"github.com/dustin/go-humanize"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
@@ -30,6 +23,8 @@ type Service struct {
 	clients     map[string]*QbitClient
 	stats       *stats.Stats
 	taskCount   int
+
+	serverClient *serverclient.Client
 }
 
 type controlNode struct {
@@ -46,6 +41,10 @@ func NewService(cfg *Config) *Service {
 	}
 
 	s.initClients()
+
+	if s.cfg.Manager.Addr != "" && s.cfg.Manager.Token != "" {
+		s.serverClient = serverclient.NewClient(s.cfg.Manager.Addr, s.cfg.Manager.Token)
+	}
 
 	return s
 }
@@ -67,7 +66,9 @@ func (s *Service) Run() {
 	for sig := range sigCh {
 		log.Info().Msgf("got signal %q, shutting down server", sig)
 
-		s.Deregister()
+		if err := s.Deregister(); err != nil {
+			os.Exit(1)
+		}
 
 		os.Exit(0)
 	}
@@ -118,15 +119,28 @@ func (s *Service) registerAgentWithServer(tickerDuration time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), tickerDuration)
 	defer cancel()
 	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent.NodeName, s.cfg.Agent.ClientAddr); err != nil {
-		//log.Error().Err(err).Msgf("could not register agent and join server: %s", s.cfg.Manager.Addr)
 		return err
 	}
 
 	return nil
 }
 
-func (s *Service) Deregister() {
-	log.Info().Msgf("deregister")
+func (s *Service) Deregister() error {
+	ctx := context.Background()
+
+	log.Info().Msgf("deregister node with server")
+
+	req := serverclient.DeregisterRequest{
+		NodeName:   s.cfg.Agent.NodeName,
+		ClientAddr: s.cfg.Agent.ClientAddr,
+	}
+
+	if err := s.serverClient.DeregisterRequest(ctx, req); err != nil {
+		log.Error().Err(err).Msg("could not deregister node")
+		return err
+	}
+
+	return nil
 }
 
 // Join worker to manager
@@ -145,12 +159,17 @@ func (s *Service) Join(ctx context.Context, addr string, token string, name stri
 		}
 	}
 
-	joinReq := JoinRequest{
+	joinReq := serverclient.JoinRequest{
 		NodeName:   nodeName,
 		ClientAddr: clientAddr,
 	}
 
-	if err := joinRequest(ctx, addr, token, joinReq); err != nil {
+	//if s.serverClient == nil {
+	//	s.serverClient = serverclient.NewClient(addr, token)
+	//}
+	s.serverClient = serverclient.NewClient(addr, token)
+
+	if err := s.serverClient.JoinRequest(ctx, joinReq); err != nil {
 		return err
 	}
 
@@ -173,71 +192,28 @@ func (s *Service) GetFreeSpace(ctx context.Context, dir string) error {
 	return nil
 }
 
-//func (s *Service) CanDownload(ctx context.Context) ([]*QbitClient, error) {
-//	fetcher := errgroup.Group{}
+//func checkFreeSpace(paths []string) (bool, error) {
+//	for _, path := range paths {
+//		splits := strings.Split(path, "=")
 //
-//	readyClients := []*QbitClient{}
-//
-//	for _, c := range s.clients {
-//		c := c
-//
-//		fetcher.Go(func() error {
-//			// get active downloads
-//			fmt.Println(c.Name)
-//
-//			hasSpace, err := checkFreeSpace(c.Rules.FreeSpace)
+//		if len(splits) >= 2 {
+//			minFreeBytes, err := humanize.ParseBytes(splits[1])
 //			if err != nil {
-//				log.Error().Err(err).Msg("error checking free space")
-//				return err
+//				return false, err
 //			}
 //
-//			if !hasSpace {
-//				return nil
-//			}
+//			usage := diskusage.NewDiskUsage(splits[0])
+//			available := usage.Available()
 //
-//			activeDownloads, err := c.Client.GetTorrentsActiveDownloadsCtx(ctx)
-//			if err != nil {
-//				log.Error().Err(err).Msgf("error could not get torrents from qbit: %s", c.Name)
-//				return err
+//			if available <= minFreeBytes {
+//				log.Debug().Msgf("less free space than wanted. got: %s wanted: %s", humanize.Bytes(available), humanize.Bytes(minFreeBytes))
+//				return false, nil
 //			}
-//
-//			if len(activeDownloads) <= c.Rules.MaxActiveDownloads {
-//				readyClients = append(readyClients, c)
-//			}
-//
-//			return nil
-//		})
+//		}
 //	}
 //
-//	if err := fetcher.Wait(); err != nil {
-//		log.Error().Err(err).Msg("error could not get torrents")
-//	}
-//
-//	return readyClients, nil
+//	return true, nil
 //}
-
-func checkFreeSpace(paths []string) (bool, error) {
-	for _, path := range paths {
-		splits := strings.Split(path, "=")
-
-		if len(splits) >= 2 {
-			minFreeBytes, err := humanize.ParseBytes(splits[1])
-			if err != nil {
-				return false, err
-			}
-
-			usage := diskusage.NewDiskUsage(splits[0])
-			available := usage.Available()
-
-			if available <= minFreeBytes {
-				log.Debug().Msgf("less free space than wanted. got: %s wanted: %s", humanize.Bytes(available), humanize.Bytes(minFreeBytes))
-				return false, nil
-			}
-		}
-	}
-
-	return true, nil
-}
 
 func (s *Service) GetTasks() {
 	// get tasks
@@ -267,12 +243,16 @@ func (s *Service) StartTask(t task.Task) error {
 
 	opts := map[string]string{}
 
+	if t.Category != "" {
+		opts["category"] = t.Category
+	}
+
+	if t.Tags != "" {
+		opts["tags"] = t.Tags
+	}
+
 	for _, c := range s.clients {
 		c := c
-		//fmt.Println(c.Name)
-		//if downloads > req.MaxDownloads {
-		//	break
-		//}
 
 		sender.Go(func() error {
 			log.Debug().Msgf("add torrent %s to %s", t.Name, c.Name)
@@ -283,6 +263,7 @@ func (s *Service) StartTask(t task.Task) error {
 				return err
 			}
 
+			// TODO handle reannounce
 			//if req.InfoHash != "" {
 			//	log.Debug().Msgf("trying to re-announce torrent: %s", req.InfoHash)
 			//
@@ -435,76 +416,4 @@ func (s *Service) GetClientStats() *stats.Stats {
 	s.taskCount = s.stats.TaskCount
 
 	return s.stats
-}
-
-type JoinRequest struct {
-	NodeName   string `json:"node_name"`
-	ClientAddr string `json:"client_addr"`
-}
-
-type JoinResponse struct {
-	NodeName string `json:"node_name"`
-}
-
-func joinRequest(ctx context.Context, addr string, token string, joinReq JoinRequest) error {
-	reqUrl := buildUrl(addr, "/node/register", nil)
-
-	log.Trace().Msgf("join url: %s", reqUrl)
-
-	body, err := json.Marshal(joinReq)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqUrl, bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-
-	//req.Header.Add("Authorization", token)
-	setHeaders(ctx, req, token)
-
-	client := &http.Client{
-		Timeout: DefaultTimeout,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("bad status: %d\n", resp.StatusCode)
-	}
-
-	return nil
-}
-
-func setHeaders(ctx context.Context, req *http.Request, token string) {
-	req.Header.Add("Authorization", token)
-	req.Header.Add("User-Agent", "distribrr-client")
-
-	if ctx != nil {
-		if cid := ctx.Value("correlation_id").(string); cid != "" {
-			req.Header.Add("X-Correlation-ID", cid)
-		}
-	}
-}
-
-func buildUrl(addr string, endpoint string, params map[string]string) string {
-	apiBase := "/api/v1/"
-
-	// add query params
-	queryParams := url.Values{}
-	for key, value := range params {
-		queryParams.Add(key, value)
-	}
-
-	joinedUrl, _ := url.JoinPath(addr, apiBase, endpoint)
-	parsedUrl, _ := url.Parse(joinedUrl)
-	parsedUrl.RawQuery = queryParams.Encode()
-
-	// make into new string and return
-	return parsedUrl.String()
 }

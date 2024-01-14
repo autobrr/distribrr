@@ -8,26 +8,22 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
+	yml "gopkg.in/yaml.v3"
 )
 
 var k = koanf.New(".")
 
-type Worker struct {
-	Name               string
-	Addr               string
-	Token              string
-	User               string
-	Pass               string
-	BasicUser          string
-	BasicPass          string
-	MaxActiveDownloads int
-	//client             *qbittorrent.Client
+type AgentNode struct {
+	Name  string
+	Addr  string
+	Token string
 }
 
 type Config struct {
-	Http Http `yaml:"http"`
-	//Workers []*node.Node `yaml:"workers"`
-	//Workers []*Worker `yaml:"workers"`
+	Http  Http         `yaml:"http"`
+	Nodes []*AgentNode `yaml:"nodes"`
+
+	configFile string `yaml:"-"`
 }
 
 type Http struct {
@@ -49,10 +45,13 @@ func (c *Config) Defaults() {
 		Port:  "7422",
 		Token: "",
 	}
+	c.Nodes = make([]*AgentNode, 0)
 }
 
 func (c *Config) LoadFromFile(configPath string) error {
 	if configPath != "" {
+		c.configFile = configPath
+
 		// create config if it doesn't exist
 		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 			//if writeErr := cfg.writeFile(configPath); writeErr != nil {
@@ -70,6 +69,21 @@ func (c *Config) LoadFromFile(configPath string) error {
 		// unmarshal
 		if err := k.Unmarshal("", &c); err != nil {
 			log.Fatal().Err(err).Str("service", "config").Msgf("failed unmarshalling %q", configPath)
+		}
+	}
+	return nil
+}
+
+func (c *Config) WriteToFile() error {
+	if c.configFile != "" {
+		// write file
+		data, err := yml.Marshal(&c)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("failed parsing config: %q", c.configFile)
+		}
+
+		if err := os.WriteFile(c.configFile, data, 0664); err != nil {
+			log.Fatal().Err(err).Msgf("could not write config to file: %q", c.configFile)
 		}
 	}
 	return nil

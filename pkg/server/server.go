@@ -35,18 +35,15 @@ func NewService(cfg *Config) *Service {
 		log:         log.Logger.With().Str("module", "server").Logger(),
 	}
 
-	//if cfg.Workers != nil {
-	//	//s.workerNodes = cfg.Workers
-	//	for _, w := range cfg.Workers {
-	//		n := node.Node{
-	//			Name:   w.Name,
-	//			Addr:   w.Addr,
-	//			Client: agent.NewClient(w.Addr, w.Name, w.Token),
-	//		}
-	//
-	//		s.workerNodes = append(s.workerNodes, &n)
-	//	}
-	//}
+	for _, w := range cfg.Nodes {
+		n := node.Node{
+			Name:   w.Name,
+			Addr:   w.Addr,
+			Client: agent.NewClient(w.Addr, w.Name, w.Token),
+		}
+
+		s.workerNodes = append(s.workerNodes, &n)
+	}
 
 	return s
 }
@@ -71,32 +68,70 @@ func (s *Service) Run() {
 }
 
 func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
+	l := log.Ctx(ctx)
+
+	l.Debug().Msgf("register node: %s", req.NodeName)
+
+	// validate token
 	if s.cfg.Http.Token != req.Token {
 		return errors.New("could not register node: bad token")
+	}
+
+	// check s.workerNodes if it includes item by req.NodeName
+	exists := slices.ContainsFunc(s.workerNodes, func(n *node.Node) bool {
+		return n.Name == req.NodeName && n.Addr == req.ClientAddr
+	})
+
+	if exists {
+		l.Debug().Msgf("node already exists in config: %s", req.NodeName)
+		return nil
 	}
 
 	n := node.Node{
 		Name:        req.NodeName,
 		Addr:        req.ClientAddr,
+		Token:       req.Token,
 		Client:      agent.NewClient(req.ClientAddr, req.NodeName, req.Token),
 		DateCreated: time.Now().UTC(),
 	}
 
 	s.workerNodes = append(s.workerNodes, &n)
 
-	l := log.Ctx(ctx)
+	a := AgentNode{
+		Name:  req.NodeName,
+		Addr:  req.ClientAddr,
+		Token: req.Token,
+	}
+
+	s.cfg.Nodes = append(s.cfg.Nodes, &a)
+
+	if err := s.cfg.WriteToFile(); err != nil {
+		l.Error().Err(err).Msgf("could not write node to config")
+		return err
+	}
 
 	l.Info().Msgf("on register: new node %s %s", req.NodeName, req.ClientAddr)
 
 	return nil
 }
 
-func (s *Service) Deregister(req DeregisterRequest) error {
+func (s *Service) Deregister(ctx context.Context, req DeregisterRequest) error {
 	slices.DeleteFunc(s.workerNodes, func(node *node.Node) bool {
 		return node.Name == req.NodeName
 	})
 
-	// TODO remove from config file
+	// remove from config slice
+	slices.DeleteFunc(s.cfg.Nodes, func(node *AgentNode) bool {
+		return node.Name == req.NodeName
+	})
+
+	l := log.Ctx(ctx)
+
+	// remove from config file
+	if err := s.cfg.WriteToFile(); err != nil {
+		l.Error().Err(err).Msgf("could not write node to config")
+		return err
+	}
 
 	log.Info().Msgf("deregister: node %s", req.NodeName)
 
