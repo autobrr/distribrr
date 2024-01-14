@@ -8,9 +8,8 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - windows
-      - darwin
-      - freebsd
+#      - darwin
+#      - freebsd
     goarch:
       - amd64
       - arm
@@ -18,16 +17,12 @@ builds:
     goarm:
       - 6
     ignore:
-      - goos: windows
-        goarch: arm
-      - goos: windows
-        goarch: arm64
-      - goos: darwin
-        goarch: arm
-      - goos: freebsd
-        goarch: arm
-      - goos: freebsd
-        goarch: arm64
+#      - goos: darwin
+#        goarch: arm
+#      - goos: freebsd
+#        goarch: arm
+#      - goos: freebsd
+#        goarch: arm64
     main: ./cmd/distribrr/main.go
     binary: distribrr
 
@@ -35,9 +30,6 @@ archives:
   - id: distribrr
     builds:
       - distribrr
-    format_overrides:
-      - goos: windows
-        format: zip
 
 release:
   prerelease: auto
