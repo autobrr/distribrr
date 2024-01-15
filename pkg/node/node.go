@@ -15,6 +15,7 @@ type Node struct {
 	Addr            string
 	Ip              string
 	Api             string
+	Token           string
 	Memory          int64
 	MemoryAllocated int64
 	Disk            int64
