@@ -1,0 +1,16 @@
+.run
+.gitignore
+.github
+.dev
+dev/
+config.yaml
+config_*.yaml
+.goreleaser.yml
+Dockerfile
+Dockerfile.ci
+docker-compose.yml
+README.md
+CODE_OF_CONDUCT.md
+bin
+config
+test
