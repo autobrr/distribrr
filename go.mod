@@ -3,7 +3,7 @@ module github.com/autobrr/distribrr
 go 1.21
 
 require (
-	github.com/anacrolix/torrent v1.53.2
+	github.com/anacrolix/torrent v1.53.3
 	github.com/autobrr/go-qbittorrent v1.8.1
 	github.com/avast/retry-go v3.0.0+incompatible
 	github.com/blang/semver v3.5.1+incompatible
@@ -11,7 +11,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/go-chi/chi/v5 v5.0.11
 	github.com/go-chi/render v1.0.3
-	github.com/google/uuid v1.5.0
+	github.com/google/uuid v1.6.0
 	github.com/knadh/koanf v1.5.0
 	github.com/pkg/errors v0.9.1
 	github.com/rhysd/go-github-selfupdate v1.2.3
@@ -20,6 +20,7 @@ require (
 	github.com/spf13/cobra v1.8.0
 	golang.org/x/net v0.20.0
 	golang.org/x/sync v0.6.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -48,5 +49,4 @@ require (
 	golang.org/x/sys v0.16.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.32.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
