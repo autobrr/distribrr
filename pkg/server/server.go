@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/autobrr/distribrr/pkg/agent"
 	"github.com/autobrr/distribrr/pkg/logger"
 	"github.com/autobrr/distribrr/pkg/node"
 	"github.com/autobrr/distribrr/pkg/scheduler"
@@ -36,13 +35,7 @@ func NewService(cfg *Config) *Service {
 	}
 
 	for _, w := range cfg.Nodes {
-		n := node.Node{
-			Name:   w.Name,
-			Addr:   w.Addr,
-			Client: agent.NewClient(w.Addr, w.Name, w.Token),
-		}
-
-		s.workerNodes = append(s.workerNodes, &n)
+		s.workerNodes = append(s.workerNodes, node.NewNode(w.Name, w.Addr, w.Token, "worker"))
 	}
 
 	return s
@@ -87,25 +80,11 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 		return nil
 	}
 
-	n := node.Node{
-		Name:        req.NodeName,
-		Addr:        req.ClientAddr,
-		Token:       req.Token,
-		Client:      agent.NewClient(req.ClientAddr, req.NodeName, req.Token),
-		DateCreated: time.Now().UTC(),
-	}
+	newNode := node.NewNode(req.NodeName, req.ClientAddr, req.Token, "worker")
 
-	s.workerNodes = append(s.workerNodes, &n)
+	s.workerNodes = append(s.workerNodes, newNode)
 
-	a := AgentNode{
-		Name:  req.NodeName,
-		Addr:  req.ClientAddr,
-		Token: req.Token,
-	}
-
-	s.cfg.Nodes = append(s.cfg.Nodes, &a)
-
-	if err := s.cfg.WriteToFile(); err != nil {
+	if err := s.appendNodeToConfig(ctx, req.NodeName, req.ClientAddr, req.Token); err != nil {
 		l.Error().Err(err).Msgf("could not write node to config")
 		return err
 	}
@@ -115,17 +94,52 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 	return nil
 }
 
+func (s *Service) appendNodeToConfig(_ context.Context, nodeName string, clientAddr string, token string) error {
+	log.Debug().Msgf("append node to config: %s %s", nodeName, clientAddr)
+
+	a := AgentNode{
+		Name:  nodeName,
+		Addr:  clientAddr,
+		Token: token,
+	}
+
+	s.cfg.Nodes = append(s.cfg.Nodes, &a)
+
+	if err := s.cfg.WriteToFile(); err != nil {
+		log.Error().Err(err).Msgf("could not write node to config")
+		return errors.Wrap(err, "could not write node to config")
+	}
+
+	return nil
+}
+
 func (s *Service) Deregister(ctx context.Context, req DeregisterRequest) error {
+	log.Info().Msgf("deregister: node %s", req.NodeName)
+
 	slices.DeleteFunc(s.workerNodes, func(node *node.Node) bool {
 		return node.Name == req.NodeName
 	})
 
+	if err := s.removeNodeFromConfig(ctx, req.NodeName); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Service) removeNodeFromConfig(ctx context.Context, nodeName string) error {
+	log.Debug().Msgf("remove node from config: node %s", nodeName)
+
 	// remove from config slice
-	slices.DeleteFunc(s.cfg.Nodes, func(node *AgentNode) bool {
-		return node.Name == req.NodeName
+	slices.DeleteFunc(s.cfg.Nodes, func(agentNode *AgentNode) bool {
+		return agentNode.Name == nodeName
 	})
 
 	l := log.Ctx(ctx)
+
+	if len(s.cfg.Nodes) == 0 {
+		s.cfg.Nodes = []*AgentNode{}
+	}
 
 	// remove from config file
 	if err := s.cfg.WriteToFile(); err != nil {
@@ -133,9 +147,13 @@ func (s *Service) Deregister(ctx context.Context, req DeregisterRequest) error {
 		return err
 	}
 
-	log.Info().Msgf("deregister: node %s", req.NodeName)
+	log.Info().Msgf("deregister: node %s", nodeName)
 
 	return nil
+}
+
+func (s *Service) GetNodes(_ context.Context) ([]*node.Node, error) {
+	return s.workerNodes, nil
 }
 
 func (s *Service) HealthChecks() {
@@ -143,15 +161,22 @@ func (s *Service) HealthChecks() {
 		fetcher := errgroup.Group{}
 
 		for _, n := range s.workerNodes {
-			n := n
-
 			fetcher.Go(func() error {
-				//log.Debug().Msgf("healthcheck: %s", n.Name)
+				//log.Trace().Msgf("healthcheck: %s", n.Name)
 
 				if err := n.HealthCheck(context.Background()); err != nil {
 					log.Error().Err(err).Msgf("agent healthcheck failed: %s", n.Name)
+
+					n.Status = node.StatusUnknown
+
+					log.Warn().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
+
 					return err
 				}
+
+				n.Status = node.StatusReady
+
+				log.Trace().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
 
 				return nil
 			})
@@ -195,10 +220,9 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) {
 	// TODO get tasks
 	//te := task.NewEvent()
 
-	l.Trace().Msg("selecting agents")
+	l.Trace().Msg("selecting workers")
 
 	// select workers
-	//nodes := s.workerNodes
 	nodes, err := s.selectWorkers(ctx, te.Task)
 	if err != nil {
 		l.Error().Err(err).Msg("error selecting nodes")
@@ -214,27 +238,15 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) {
 
 	// proxy download to only download once
 
-	l.Trace().Msgf("task max replicas %d", te.Task.MaxDownloads)
-
-	// check maxDownloads and add to X nodes
-	if len(nodes) > te.Task.MaxDownloads {
-		nodes = nodes[:te.Task.MaxDownloads]
-
-		l.Trace().Msgf("preparing to send task to %d node(s)", len(nodes))
-	}
-
 	fetcher := errgroup.Group{}
 
 	nodesOK := 0
 
 	// post to worker nodes
 	for _, n := range nodes {
-		n := n
-
 		subLogger := l.With().Str("node", n.Name).Logger()
 
 		fetcher.Go(func() error {
-
 			subLogger.Debug().Msgf("sending task to: %s", n.Name)
 
 			if err := n.StartTask(ctx, &te); err != nil {
@@ -268,7 +280,7 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 	var sc scheduler.LeastActive
 
 	// get candidates
-	candidates := sc.SelectCandidateNodes(t, s.workerNodes)
+	candidates := sc.SelectCandidateNodes(ctx, t, s.workerNodes)
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -281,6 +293,15 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 
 	// pick
 	nodes := sc.Pick(scores, candidates)
+
+	s.log.Trace().Msgf("task max replicas %d", t.MaxAllowedReplicas)
+
+	// check MaxAllowedReplicas and add to X nodes
+	if len(nodes) > t.MaxAllowedReplicas {
+		nodes = nodes[:t.MaxAllowedReplicas]
+
+		s.log.Trace().Msgf("preparing to send task to %d node(s)", len(nodes))
+	}
 
 	return nodes, nil
 }
@@ -315,6 +336,12 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 //}
 
 func (s *Service) AddTask(ctx context.Context, te task.Event) {
+	// TODO add to queue
+
+	s.SendWork(ctx, te)
+}
+
+func (s *Service) QueueTask(ctx context.Context, te task.Event) {
 	// TODO add to queue
 
 	s.SendWork(ctx, te)

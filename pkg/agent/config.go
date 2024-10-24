@@ -21,9 +21,9 @@ type Config struct {
 }
 
 type Agent struct {
-	NodeName    string   `yaml:"nodeName"`
-	ClientAddr  string   `yaml:"clientAddr"`
-	Annotations []string `yaml:"annotations"`
+	NodeName   string            `yaml:"nodeName"`
+	ClientAddr string            `yaml:"clientAddr"`
+	Labels     map[string]string `yaml:"labels"`
 }
 
 type Manager struct {
@@ -51,6 +51,11 @@ func (c *Config) Defaults() {
 		Token: "",
 	}
 	c.Manager = Manager{}
+	c.Agent = Agent{
+		NodeName:   "",
+		ClientAddr: "",
+		Labels:     map[string]string{},
+	}
 	c.Clients = map[string]*QbitClient{}
 	//c.Clients = make(map[string]*QbitClient, 0)
 }

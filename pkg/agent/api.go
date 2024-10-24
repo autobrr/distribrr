@@ -96,7 +96,7 @@ func (s *APIServer) Handler() http.Handler {
 
 			r.Route("/stats", func(r chi.Router) {
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-					s := s.service.GetStatsFull()
+					s := s.service.GetStatsFull(r.Context())
 					if s == nil {
 						render.Status(r, http.StatusInternalServerError)
 						return
@@ -104,6 +104,15 @@ func (s *APIServer) Handler() http.Handler {
 
 					render.Status(r, http.StatusOK)
 					render.JSON(w, r, s)
+				})
+			})
+
+			r.Route("/labels", func(r chi.Router) {
+				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+					label := s.service.GetLabels()
+
+					render.Status(r, http.StatusOK)
+					render.JSON(w, r, label)
 				})
 			})
 		})

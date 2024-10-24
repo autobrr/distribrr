@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
-	"github.com/autobrr/distribrr/pkg/server/client"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/autobrr/distribrr/pkg/server/client"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
@@ -329,9 +329,9 @@ func (s *Service) CollectStats() {
 	}
 }
 
-func (s *Service) GetStatsFull() *stats.Stats {
+func (s *Service) GetStatsFull(ctx context.Context) *stats.Stats {
 	s.stats = stats.GetStats()
-	s.GetClientStats()
+	s.GetClientStats(ctx)
 	return s.stats
 }
 
@@ -363,11 +363,11 @@ func (s *Service) GetStats() *stats.Stats {
 	//	l.Trace().Msgf("found %d active torrents for client", len(t))
 	//
 	//	ct := stats.ClientStats{
-	//		ClientActiveDownloads: len(t),
-	//		ClientReady:           len(t) < client.Rules.Torrents.MaxActiveDownloads,
+	//		ActiveDownloads: len(t),
+	//		Ready:           len(t) < client.Rules.Torrents.MaxActiveDownloads,
 	//	}
 	//
-	//	l.Trace().Msgf("client ready: %t", ct.ClientReady)
+	//	l.Trace().Msgf("client ready: %t", ct.Ready)
 	//
 	//	s.stats.ClientStats[client.Name] = ct
 	//}
@@ -377,7 +377,7 @@ func (s *Service) GetStats() *stats.Stats {
 	return s.stats
 }
 
-func (s *Service) GetClientStats() *stats.Stats {
+func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 	log.Trace().Msg("collecting stats")
 	//s.stats = stats.GetStats()
 
@@ -395,20 +395,21 @@ func (s *Service) GetClientStats() *stats.Stats {
 
 		l.Trace().Msg("get active torrents for client")
 
-		t, err := client.Client.GetTorrentsActiveDownloadsCtx(context.Background())
+		activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
 		if err != nil {
 			l.Error().Err(err).Msgf("could not load active torrents for client")
 			continue
 		}
 
-		l.Trace().Msgf("found %d active torrents for client", len(t))
+		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
 
 		ct := stats.ClientStats{
-			ClientActiveDownloads: len(t),
-			ClientReady:           len(t) < client.Rules.Torrents.MaxActiveDownloads,
+			ActiveDownloads: len(activeDownloads),
+			Ready:           len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
 		}
 
-		l.Trace().Msgf("client ready: %t", ct.ClientReady)
+		l.Trace().Msgf("[%d/%d] active downloads, status ready: %t", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Ready)
+		l.Debug().Msgf("client ready: %t", ct.Ready)
 
 		s.stats.ClientStats[name] = ct
 	}
@@ -416,4 +417,8 @@ func (s *Service) GetClientStats() *stats.Stats {
 	s.taskCount = s.stats.TaskCount
 
 	return s.stats
+}
+
+func (s *Service) GetLabels() map[string]string {
+	return s.cfg.Agent.Labels
 }

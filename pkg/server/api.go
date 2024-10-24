@@ -65,6 +65,16 @@ func (s *APIServer) Handler() http.Handler {
 		r.Use(mw.IsAuthenticated(s.token))
 
 		r.Route("/node", func(r chi.Router) {
+			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+				nodes, err := s.service.GetNodes(r.Context())
+				if err != nil {
+					render.Status(r, http.StatusInternalServerError)
+					return
+				}
+
+				render.JSON(w, r, nodes)
+			})
+
 			r.Post("/register", func(w http.ResponseWriter, r *http.Request) {
 				req := RegisterRequest{}
 
