@@ -88,3 +88,24 @@ func (r *LeastActive) Pick(scores map[string]float64, candidates []*node.Node) [
 	//return bestNodes
 	return candidates
 }
+
+func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, number int) []*node.Node {
+	// select amount of candidates if greater than 0
+	if number > 0 {
+		if len(candidates) > number {
+			candidates = candidates[:number]
+		}
+	}
+
+	//var bestNodes []*node.Node
+	//for idx, candidate := range candidates {
+	//	n := candidate
+	//	if idx == 0 {
+	//		bestNodes = append(bestNodes, n)
+	//		continue
+	//	}
+	//}
+	//
+	//return bestNodes
+	return candidates
+}

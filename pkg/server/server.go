@@ -292,16 +292,9 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 	}
 
 	// pick
-	nodes := sc.Pick(scores, candidates)
+	nodes := sc.PickN(scores, candidates, t.MaxAllowedReplicas)
 
 	s.log.Trace().Msgf("task max replicas %d", t.MaxAllowedReplicas)
-
-	// check MaxAllowedReplicas and add to X nodes
-	if len(nodes) > t.MaxAllowedReplicas {
-		nodes = nodes[:t.MaxAllowedReplicas]
-
-		s.log.Trace().Msgf("preparing to send task to %d node(s)", len(nodes))
-	}
 
 	return nodes, nil
 }
