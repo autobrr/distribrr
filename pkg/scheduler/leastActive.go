@@ -21,6 +21,8 @@ type LeastActive struct {
 }
 
 func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) []*node.Node {
+	var candidates []*node.Node
+
 	for _, n := range nodes {
 		// match nodes by labels
 		nodeLabels, err := n.GetLabels(ctx)
@@ -32,9 +34,11 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 		if !checkLabels(t.Labels, nodeLabels) {
 			continue
 		}
+
+		candidates = append(candidates, n)
 	}
 
-	return nodes
+	return candidates
 }
 
 // checkLabels match nodes by labels
