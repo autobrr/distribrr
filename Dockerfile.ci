@@ -29,8 +29,8 @@ go build -ldflags "-s -w -X github.com/autobrr/distribrr/pkg/version.Version=${V
 # build runner
 FROM alpine:latest AS runner
 
-LABEL org.opencontainers.image.source = "https://github.com/autobrr/distribrr"
-LABEL org.opencontainers.image.base.name = "alpine:latest"
+LABEL org.opencontainers.image.source="https://github.com/autobrr/distribrr"
+LABEL org.opencontainers.image.base.name="alpine:latest"
 
 ENV HOME="/config" \
     XDG_CONFIG_HOME="/config" \
