@@ -10,21 +10,24 @@ var (
 	Version   = "dev"
 	Commit    = ""
 	BuildDate = ""
+	BuiltBy   = ""
 	Info      BuildInfo
 )
 
 func init() {
 	Info = BuildInfo{
-		Version: Version,
-		Commit:  Commit,
-		Date:    BuildDate,
+		Version:  Version,
+		Commit:   Commit,
+		Date:     BuildDate,
+		BuildtBy: BuiltBy,
 	}
 }
 
 type BuildInfo struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-	Date    string `json:"build_date"`
+	Version  string `json:"version"`
+	Commit   string `json:"commit"`
+	Date     string `json:"build_date"`
+	BuildtBy string `json:"buildt_by"`
 }
 
 func (i BuildInfo) Print(output string) {
@@ -42,6 +45,7 @@ func (i BuildInfo) Print(output string) {
 Version: %s
 Commit: %s
 Date: %s
-`, Version, Commit, BuildDate)
+Built by: %s
+`, Version, Commit, BuildDate, BuiltBy)
 	}
 }
