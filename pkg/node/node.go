@@ -64,6 +64,10 @@ func (n *Node) HealthCheck(ctx context.Context) error {
 	return n.client.HealthCheck(ctx)
 }
 
+func (n *Node) VerifyToken(ctx context.Context) error {
+	return n.client.VerifyToken(ctx)
+}
+
 func (n *Node) GetStats(ctx context.Context) (*stats.Stats, error) {
 	nodeStats, err := n.client.GetStats(ctx)
 	if err != nil {

@@ -137,6 +137,37 @@ func (c *Client) getStats(ctx context.Context) (*stats.Stats, error) {
 	return &s, nil
 }
 
+func (c *Client) VerifyToken(ctx context.Context) error {
+	return c.verifyToken(ctx)
+}
+
+func (c *Client) verifyToken(ctx context.Context) error {
+	reqUrl, err := c.buildUrl(c.addr, "verify", nil)
+	if err != nil {
+		return errors.Wrapf(err, "could not build URL: %s", c.name)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
+	if err != nil {
+		return errors.Wrapf(err, "could not create request for node: %s", c.name)
+	}
+
+	c.setHeaders(ctx, req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return errors.Wrapf(err, "error during request for node: %s", c.name)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+	}
+
+	return nil
+}
+
 func (c *Client) StartTask(ctx context.Context, te *task.Event) error {
 	return c.startTask(ctx, te)
 }

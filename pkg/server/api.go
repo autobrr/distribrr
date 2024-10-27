@@ -95,7 +95,7 @@ func (s *APIServer) Handler() http.Handler {
 					}
 
 					if token := r.Context().Value("token").(string); token != "" {
-						req.Token = token
+						req.ServerToken = token
 					}
 
 					if err := s.service.OnRegister(r.Context(), req); err != nil {

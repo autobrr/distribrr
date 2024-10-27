@@ -37,11 +37,15 @@ To use with autobrr set up a new action of type `Webhook` and use the following:
 2. Payload:
     ```json
     {
-      "download_url": "{{ .DownloadURL }}",
+      "download_url": "{{ .DownloadUrl }}",
       "name": "{{ .TorrentName }}",
-      "max_downloads": 2,
-      "category": "race-test",
-      "tags": "tag1,tag2"
+      "max_replicas": 2,
+      "category": "race",
+      "tags": "race,distribrr",
+      "indexer": "{{ .IndexerName }}",
+      "labels": {
+        "region": "test"
+      }
     }
     ```
 

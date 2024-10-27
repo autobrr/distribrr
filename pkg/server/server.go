@@ -74,8 +74,16 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 	l.Debug().Msgf("register node: %s", req.NodeName)
 
 	// validate token
-	if s.cfg.Http.Token != req.Token {
+	if s.cfg.Http.Token != req.ServerToken {
 		return errors.New("could not register node: bad token")
+	}
+
+	newNode := node.NewNode(req.NodeName, req.ClientAddr, req.AgentToken, "worker")
+	newNode.Labels = req.Labels
+
+	if err := newNode.VerifyToken(ctx); err != nil {
+		s.log.Error().Err(err).Msgf("could not verify agent token")
+		return err
 	}
 
 	// check s.workerNodes if it includes item by req.NodeName
@@ -97,12 +105,9 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 		return nil
 	}
 
-	newNode := node.NewNode(req.NodeName, req.ClientAddr, req.Token, "worker")
-	newNode.Labels = req.Labels
-
 	s.workerNodes = append(s.workerNodes, newNode)
 
-	if err := s.appendNodeToConfig(ctx, req.NodeName, req.ClientAddr, req.Token); err != nil {
+	if err := s.appendNodeToConfig(ctx, req.NodeName, req.ClientAddr, req.AgentToken); err != nil {
 		l.Error().Err(err).Msgf("could not write node to config")
 		return err
 	}
@@ -393,18 +398,19 @@ func (s *Service) QueueTask(ctx context.Context, te task.Event) {
 }
 
 type RegisterRequest struct {
-	NodeName   string            `json:"node_name"`
-	RemoteAddr string            `json:"remote_addr,omitempty"`
-	ClientAddr string            `json:"client_addr"`
-	Token      string            `json:"api_key"`
-	Labels     map[string]string `json:"labels"`
+	NodeName    string            `json:"node_name"`
+	RemoteAddr  string            `json:"remote_addr,omitempty"`
+	ClientAddr  string            `json:"client_addr"`
+	AgentToken  string            `json:"token"`
+	Labels      map[string]string `json:"labels"`
+	ServerToken string            `json:"-"`
 }
 
 type DeregisterRequest struct {
 	NodeName string `json:"node_name"`
 	//RemoteAddr string `json:"remote_addr,omitempty"`
 	//ClientAddr string `json:"client_addr"`
-	//Token string `json:"api_key"`
+	//AgentToken string `json:"api_key"`
 }
 
 type ScheduleDownloadRequest struct {

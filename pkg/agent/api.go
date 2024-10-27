@@ -77,6 +77,10 @@ func (s *APIServer) Handler() http.Handler {
 			// make sure request is authenticated
 			r.Use(mw.IsAuthenticated(s.token))
 
+			r.Get("/verify", func(w http.ResponseWriter, r *http.Request) {
+				render.Status(r, http.StatusOK)
+			})
+
 			r.Route("/tasks", func(r chi.Router) {
 				r.Post("/", func(w http.ResponseWriter, r *http.Request) {
 					te := task.Event{}
