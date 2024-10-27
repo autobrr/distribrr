@@ -24,7 +24,7 @@ export GOARCH=$TARGETARCH; \
 [[ "$GOARCH" == "arm" ]] && [[ "$TARGETVARIANT" == "v6" ]] && export GOARM=6; \
 [[ "$GOARCH" == "arm" ]] && [[ "$TARGETVARIANT" == "v7" ]] && export GOARM=7; \
 echo $GOARCH $GOOS $GOARM$GOAMD64; \
-go build -ldflags "-s -w -X version.Version=${VERSION} -X version.Commit=${REVISION} -X version.BuildDate=${BUILDTIME}" -o /out/bin/distribrr cmd/distribrr/main.go
+go build -ldflags "-s -w -X github.com/autobrr/distribrr/pkg/version.Version=${VERSION} -X github.com/autobrr/distribrr/pkg/version.Commit=${REVISION} -X github.com/autobrr/distribrr/pkg/version.BuildDate=${BUILDTIME}" -o /out/bin/distribrr cmd/distribrr/main.go
 
 # build runner
 FROM alpine:latest AS runner
