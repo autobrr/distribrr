@@ -2,12 +2,11 @@ package domain
 
 import (
 	"context"
-	"crypto/tls"
-	"io"
 	"net/http"
 	"net/http/cookiejar"
-	"os"
 	"time"
+
+	"github.com/autobrr/distribrr/pkg/sharedhttp"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/avast/retry-go"
@@ -15,28 +14,39 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
+//var client = &http.Client{
+//	Timeout: time.Second * 45,
+//	Transport: sharedhttp.TransportTLSInsecure,
+//}
+
 var ErrUnrecoverableError = errors.New("unrecoverable error")
 
+func NewRelease(url string, name string, indexer string) *Release {
+	return &Release{
+		Url:     url,
+		Hash:    "",
+		Name:    name,
+		Indexer: indexer,
+		Size:    0,
+	}
+}
+
 type Release struct {
-	TorrentURL     string
-	TorrentTmpFile string
-	RawCookie      string
-	TorrentHash    string
-	TorrentName    string
-	Indexer        string
-	Size           uint64
+	Url       string
+	RawCookie string
+	Hash      string
+	Name      string
+	Indexer   string
+	Size      uint64
+}
+
+func (r *Release) SetCookies(cookie string) {
+	r.RawCookie = cookie
 }
 
 func (r *Release) DownloadTorrentFile(ctx context.Context) error {
-	//if r.IsMagnetLink(r.MagnetURI) {
-	//	return fmt.Errorf("error trying to download magnet link: %s", r.MagnetURI)
-	//}
-
-	if r.TorrentURL == "" {
+	if r.Url == "" {
 		return errors.New("download_file: url can't be empty")
-	} else if r.TorrentTmpFile != "" {
-		// already downloaded
-		return nil
 	}
 
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
@@ -44,15 +54,13 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 		return errors.Wrap(err, "could not create cookiejar")
 	}
 
-	customTransport := http.DefaultTransport.(*http.Transport).Clone()
-	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client := &http.Client{
-		Transport: customTransport,
+		Transport: sharedhttp.TransportTLSInsecure,
 		Jar:       jar,
 		Timeout:   time.Second * 45,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.TorrentURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.Url, nil)
 	if err != nil {
 		return errors.Wrap(err, "error downloading file")
 	}
@@ -63,13 +71,6 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 		req.Header.Set("Cookie", r.RawCookie)
 	}
 
-	// Create tmp file
-	tmpFile, err := os.CreateTemp("", "distribrr-")
-	if err != nil {
-		return errors.Wrap(err, "error creating tmp file")
-	}
-	defer tmpFile.Close()
-
 	errFunc := retry.Do(func() error {
 		// Get the data
 		resp, err := client.Do(req)
@@ -79,46 +80,31 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			unRecoverableErr := errors.Wrapf(ErrUnrecoverableError, "unrecoverable error downloading torrent (%v) file (%v) from '%v' - status code: %d", r.TorrentName, r.TorrentURL, r.Indexer, resp.StatusCode)
+			unRecoverableErr := errors.Wrapf(ErrUnrecoverableError, "unrecoverable error downloading torrent (%v) file (%v) from '%v' - status code: %d", r.Name, r.Url, r.Indexer, resp.StatusCode)
 
-			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404 || resp.StatusCode == 405 {
+			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404 || resp.StatusCode == 405 || resp.StatusCode == 500 {
 				return retry.Unrecoverable(unRecoverableErr)
 			}
 
 			return errors.Errorf("unexpected status: %v", resp.StatusCode)
 		}
 
-		resetTmpFile := func() {
-			tmpFile.Seek(0, io.SeekStart)
-			tmpFile.Truncate(0)
-		}
-
-		// Write the body to file
-		if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-			resetTmpFile()
-			return errors.Wrapf(err, "error writing downloaded file: %v", tmpFile.Name())
-		}
-
-		meta, err := metainfo.LoadFromFile(tmpFile.Name())
+		meta, err := metainfo.Load(resp.Body)
 		if err != nil {
-			resetTmpFile()
-			return errors.Wrapf(err, "metainfo could not load file contents: %v", tmpFile.Name())
+			return retry.Unrecoverable(errors.Wrapf(err, "metainfo could not load file contents: %v", r.Name))
 		}
 
 		torrentMetaInfo, err := meta.UnmarshalInfo()
 		if err != nil {
-			resetTmpFile()
-			return errors.Wrapf(err, "metainfo could not unmarshal info from torrent: %v", tmpFile.Name())
+			return retry.Unrecoverable(errors.Wrapf(err, "metainfo could not unmarshal info from torrent: %v", r.Name))
 		}
 
 		hashInfoBytes := meta.HashInfoBytes().Bytes()
 		if len(hashInfoBytes) < 1 {
-			resetTmpFile()
-			return errors.New("could not read infohash")
+			return retry.Unrecoverable(errors.New("could not read infohash"))
 		}
 
-		r.TorrentTmpFile = tmpFile.Name()
-		r.TorrentHash = meta.HashInfoBytes().String()
+		r.Hash = meta.HashInfoBytes().String()
 		r.Size = uint64(torrentMetaInfo.TotalLength())
 
 		return nil

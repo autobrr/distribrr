@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"github.com/autobrr/distribrr/internal/domain"
 	"os"
 	"os/signal"
 	"syscall"
@@ -254,9 +255,16 @@ func (s *Service) StartTask(t task.Task) error {
 		opts["tags"] = t.Tags
 	}
 
+	rel := domain.NewRelease(t.DownloadURL, t.Name, t.Indexer)
+	if err := rel.DownloadTorrentFile(ctx); err != nil {
+		return err
+	}
+
 	for _, client := range s.clients {
 		sender.Go(func() error {
-			log.Debug().Msgf("add torrent %s to %s", t.Name, client.Name)
+			log.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
+
+			// TODO read from memory
 
 			// send downloads
 			if err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, opts); err != nil {
@@ -264,22 +272,26 @@ func (s *Service) StartTask(t task.Task) error {
 				return err
 			}
 
-			// TODO handle reannounce
-			//if req.InfoHash != "" {
-			//	log.Debug().Msgf("trying to re-announce torrent: %s", req.InfoHash)
-			//
-			//	go func(req domain.TorrentDownloadRequest) {
-			//		// reannounce
-			//		options := qbittorrent.ReannounceOptions{
-			//			Interval:        7,
-			//			MaxAttempts:     50,
-			//			DeleteOnFailure: false,
-			//		}
-			//		if err := client.Client.ReannounceTorrentWithRetry(context.Background(), req.InfoHash, &options); err != nil {
-			//			log.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", req.InfoHash, client.Name)
-			//		}
-			//	}(req)
-			//}
+			// handle reannounce
+			if rel.Hash != "" {
+				go func(clientName string, hash string, name string) {
+					log.Debug().Msgf("trying to re-announce torrent: %s %s", hash, name)
+
+					// reannounce
+					options := qbittorrent.ReannounceOptions{
+						Interval:        7,
+						MaxAttempts:     50,
+						DeleteOnFailure: false,
+					}
+
+					if err := client.Client.ReannounceTorrentWithRetry(context.Background(), hash, &options); err != nil {
+						log.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", hash, clientName)
+						return
+					}
+
+					log.Debug().Msgf("successfully re-announced torrent: %s %s", hash, name)
+				}(client.Name, rel.Hash, rel.Name)
+			}
 
 			//downloads++
 

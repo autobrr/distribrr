@@ -12,6 +12,7 @@ type Task struct {
 	Name               string            `json:"name"`
 	Category           string            `json:"category"`
 	Tags               string            `json:"tags"`
+	Indexer            string            `json:"indexer"`
 	State              State             `json:"-"`
 	Cpu                float64           `json:"cpu"`
 	Memory             int64             `json:"memory"`
