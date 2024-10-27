@@ -24,6 +24,10 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 	var candidates []*node.Node
 
 	for _, n := range nodes {
+		if n.Status != node.StatusReady {
+			continue
+		}
+
 		// match nodes by labels
 		nodeLabels, err := n.GetLabels(ctx)
 		if err != nil {

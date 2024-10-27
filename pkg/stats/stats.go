@@ -10,8 +10,8 @@ type ClientStatsReader interface {
 }
 
 type ClientStats struct {
-	ActiveDownloads int  `json:"client_active_downloads"`
-	Ready           bool `json:"client_ready"`
+	ActiveDownloads int  `json:"active_downloads"`
+	Ready           bool `json:"ready"` // Ready is true if ActiveDownloads is less than configured
 }
 
 type Stats struct {

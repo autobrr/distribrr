@@ -34,8 +34,9 @@ func NewClient(addr, token string) *Client {
 }
 
 type JoinRequest struct {
-	NodeName   string `json:"node_name"`
-	ClientAddr string `json:"client_addr"`
+	NodeName   string            `json:"node_name"`
+	ClientAddr string            `json:"client_addr"`
+	Labels     map[string]string `yaml:"labels"`
 }
 
 type JoinResponse struct {

@@ -39,7 +39,29 @@ func NewClient(addr, name, token string) *Client {
 }
 
 func (c *Client) HealthCheck(ctx context.Context) error {
-	// TODO ping clients
+	reqUrl, err := c.buildUrl(c.addr, "healthz/readiness", nil)
+	if err != nil {
+		return errors.Wrapf(err, "could not build URL: %s", c.name)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
+	if err != nil {
+		return errors.Wrapf(err, "could not create request for node: %s", c.name)
+	}
+
+	c.setHeaders(ctx, req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return errors.Wrapf(err, "error during request for node: %s", c.name)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("node: %s healthcheck unexpected status: %d", c.name, resp.StatusCode)
+	}
+
 	return nil
 }
 

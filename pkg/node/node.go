@@ -16,6 +16,7 @@ const (
 	StatusReady    = "READY"
 	StatusNotReady = "NOT_READY"
 	StatusUnknown  = "UNKNOWN"
+	StatusRemoved  = "REMOVED"
 )
 
 type Node struct {

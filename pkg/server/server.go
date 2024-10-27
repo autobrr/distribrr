@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 type Service struct {
 	cfg         *Config
 	workerNodes []*node.Node
+	m           sync.RWMutex
 
 	log zerolog.Logger
 }
@@ -32,11 +34,16 @@ func NewService(cfg *Config) *Service {
 		cfg:         cfg,
 		workerNodes: make([]*node.Node, 0),
 		log:         log.Logger.With().Str("module", "server").Logger(),
+		m:           sync.RWMutex{},
 	}
 
+	s.m.Lock()
 	for _, w := range cfg.Nodes {
-		s.workerNodes = append(s.workerNodes, node.NewNode(w.Name, w.Addr, w.Token, "worker"))
+		if w != nil {
+			s.workerNodes = append(s.workerNodes, node.NewNode(w.Name, w.Addr, w.Token, "worker"))
+		}
 	}
+	s.m.Unlock()
 
 	return s
 }
@@ -49,6 +56,7 @@ func (s *Service) Run() {
 		errorChannel <- srv.Open()
 	}()
 
+	//go s.HealthChecks()
 	go s.HealthChecks()
 
 	sigCh := make(chan os.Signal, 1)
@@ -77,10 +85,20 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 
 	if exists {
 		l.Debug().Msgf("node already exists in config: %s", req.NodeName)
+
+		for _, workerNode := range s.workerNodes {
+			if workerNode.Name == req.NodeName {
+				// update labels
+				workerNode.Labels = req.Labels
+				//workerNode.Status = node.StatusReady
+			}
+		}
+
 		return nil
 	}
 
 	newNode := node.NewNode(req.NodeName, req.ClientAddr, req.Token, "worker")
+	newNode.Labels = req.Labels
 
 	s.workerNodes = append(s.workerNodes, newNode)
 
@@ -116,13 +134,21 @@ func (s *Service) appendNodeToConfig(_ context.Context, nodeName string, clientA
 func (s *Service) Deregister(ctx context.Context, req DeregisterRequest) error {
 	log.Info().Msgf("deregister: node %s", req.NodeName)
 
-	slices.DeleteFunc(s.workerNodes, func(node *node.Node) bool {
-		return node.Name == req.NodeName
-	})
-
-	if err := s.removeNodeFromConfig(ctx, req.NodeName); err != nil {
-		return err
+	for _, workerNode := range s.workerNodes {
+		if workerNode.Name == req.NodeName {
+			//s.workerNodes = append(s.workerNodes[:i], s.workerNodes[i+1:]...)
+			workerNode.Status = node.StatusRemoved
+			break
+		}
 	}
+
+	//slices.DeleteFunc(s.workerNodes, func(node *node.Node) bool {
+	//	return node.Name == req.NodeName
+	//})
+
+	//if err := s.removeNodeFromConfig(ctx, req.NodeName); err != nil {
+	//	return err
+	//}
 
 	return nil
 }
@@ -152,42 +178,68 @@ func (s *Service) removeNodeFromConfig(ctx context.Context, nodeName string) err
 	return nil
 }
 
-func (s *Service) GetNodes(_ context.Context) ([]*node.Node, error) {
-	return s.workerNodes, nil
+func (s *Service) GetNodes() []*node.Node {
+	s.m.RLock()
+	defer s.m.RUnlock()
+	return s.workerNodes
 }
 
 func (s *Service) HealthChecks() {
+	tickerDuration := time.Second * 10
+
+	ticker := time.NewTicker(tickerDuration)
+	defer ticker.Stop()
+
 	for {
-		fetcher := errgroup.Group{}
+		select {
+		case <-ticker.C:
+			ctx := context.Background()
 
-		for _, n := range s.workerNodes {
-			fetcher.Go(func() error {
-				//log.Trace().Msgf("healthcheck: %s", n.Name)
-
-				if err := n.HealthCheck(context.Background()); err != nil {
-					log.Error().Err(err).Msgf("agent healthcheck failed: %s", n.Name)
-
-					n.Status = node.StatusUnknown
-
-					log.Warn().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
-
-					return err
-				}
-
-				n.Status = node.StatusReady
-
-				log.Trace().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
-
-				return nil
-			})
+			if err := s.healthChecks(ctx); err != nil {
+				s.log.Error().Err(err).Msg("health checks failed")
+			}
 		}
-
-		if err := fetcher.Wait(); err != nil {
-			log.Error().Err(err).Msg("health checks failed for node(s)")
-		}
-
-		time.Sleep(15 * time.Second)
 	}
+}
+
+func (s *Service) healthChecks(ctx context.Context) error {
+	fetcher := errgroup.Group{}
+
+	workerNodes := s.GetNodes()
+
+	for _, n := range workerNodes {
+		if n.Status == node.StatusRemoved {
+			s.log.Trace().Msgf("healthcheck: %s Status: %s ignored", n.Name, n.Status)
+			continue
+		}
+
+		fetcher.Go(func() error {
+			//log.Trace().Msgf("healthcheck: %s", n.Name)
+
+			if err := n.HealthCheck(ctx); err != nil {
+				log.Error().Err(err).Msgf("agent healthcheck failed: %s", n.Name)
+
+				n.Status = node.StatusUnknown
+
+				log.Warn().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
+
+				return err
+			}
+
+			n.Status = node.StatusReady
+
+			log.Trace().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
+
+			return nil
+		})
+	}
+
+	if err := fetcher.Wait(); err != nil {
+		log.Error().Err(err).Msg("health checks failed for node(s)")
+		return errors.Wrap(err, "health checks failed for node(s)")
+	}
+
+	return nil
 }
 
 func (s *Service) ProcessTasks() {
@@ -341,10 +393,11 @@ func (s *Service) QueueTask(ctx context.Context, te task.Event) {
 }
 
 type RegisterRequest struct {
-	NodeName   string `json:"node_name"`
-	RemoteAddr string `json:"remote_addr,omitempty"`
-	ClientAddr string `json:"client_addr"`
-	Token      string `json:"api_key"`
+	NodeName   string            `json:"node_name"`
+	RemoteAddr string            `json:"remote_addr,omitempty"`
+	ClientAddr string            `json:"client_addr"`
+	Token      string            `json:"api_key"`
+	Labels     map[string]string `json:"labels"`
 }
 
 type DeregisterRequest struct {
