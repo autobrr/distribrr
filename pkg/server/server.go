@@ -90,7 +90,7 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 			if workerNode.Name == req.NodeName {
 				// update labels
 				workerNode.Labels = req.Labels
-				//workerNode.Status = node.StatusReady
+				workerNode.Status = node.StatusReady
 			}
 		}
 
