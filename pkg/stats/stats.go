@@ -10,8 +10,8 @@ type ClientStatsReader interface {
 }
 
 type ClientStats struct {
-	ClientActiveDownloads int  `json:"client_active_downloads"`
-	ClientReady           bool `json:"client_ready"`
+	ActiveDownloads int  `json:"active_downloads"`
+	Ready           bool `json:"ready"` // Ready is true if ActiveDownloads is less than configured
 }
 
 type Stats struct {
@@ -68,8 +68,8 @@ func (s *Stats) CpuUsage() float64 {
 
 func (s *Stats) SetClientActiveDownloads(client string, count int) uint64 {
 	s.ClientStats[client] = ClientStats{
-		ClientActiveDownloads: count,
-		ClientReady:           false,
+		ActiveDownloads: count,
+		Ready:           false,
 	}
 	return uint64(count)
 }

@@ -58,13 +58,19 @@ func (s *APIServer) Handler() http.Handler {
 	r.Use(mw.RequestLogger)
 
 	r.Route("/api/v1/", func(r chi.Router) {
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			if err := s.service.Healthcheck(r.Context()); err != nil {
-				render.Status(r, http.StatusFailedDependency)
-				return
-			}
+		r.Route("/healthz", func(r chi.Router) {
+			r.Get("/liveness", func(w http.ResponseWriter, r *http.Request) {
+				render.Status(r, http.StatusOK)
+			})
 
-			render.Status(r, http.StatusOK)
+			r.Get("/readiness", func(w http.ResponseWriter, r *http.Request) {
+				if err := s.service.Healthcheck(r.Context()); err != nil {
+					render.Status(r, http.StatusFailedDependency)
+					return
+				}
+
+				render.Status(r, http.StatusOK)
+			})
 		})
 
 		r.Group(func(r chi.Router) {
@@ -96,7 +102,7 @@ func (s *APIServer) Handler() http.Handler {
 
 			r.Route("/stats", func(r chi.Router) {
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-					s := s.service.GetStatsFull()
+					s := s.service.GetStatsFull(r.Context())
 					if s == nil {
 						render.Status(r, http.StatusInternalServerError)
 						return
@@ -104,6 +110,15 @@ func (s *APIServer) Handler() http.Handler {
 
 					render.Status(r, http.StatusOK)
 					render.JSON(w, r, s)
+				})
+			})
+
+			r.Route("/labels", func(r chi.Router) {
+				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+					label := s.service.GetLabels()
+
+					render.Status(r, http.StatusOK)
+					render.JSON(w, r, label)
 				})
 			})
 		})

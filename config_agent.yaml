@@ -6,11 +6,9 @@ http:
 agent:
   nodeName: test-node1
   clientAddr: http://localhost:7430
-  annotations:
-    - hetzner
-    - ssd
   labels:
-    - speed=1g
+    network: 1G
+    disktype: ssd
 
 manager:
   addr: http://localhost:7422
@@ -39,5 +37,3 @@ clients:
         maxActiveDownloads: 3
         maxTotalDownloads: 3
         maxTotalTorrents: 100
-
-      maxActiveDownloads: 3

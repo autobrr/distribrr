@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
-	"github.com/autobrr/distribrr/pkg/server/client"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/autobrr/distribrr/pkg/server/client"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
@@ -118,7 +118,7 @@ func (s *Service) registerAgentWithServer(tickerDuration time.Duration) error {
 	// Create a new context that will be done after tickerDuration
 	ctx, cancel := context.WithTimeout(context.Background(), tickerDuration)
 	defer cancel()
-	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent.NodeName, s.cfg.Agent.ClientAddr); err != nil {
+	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent); err != nil {
 		return err
 	}
 
@@ -144,10 +144,14 @@ func (s *Service) Deregister() error {
 }
 
 // Join worker to manager
-func (s *Service) Join(ctx context.Context, addr string, token string, name string, clientAddr string) error {
+func (s *Service) Join(ctx context.Context, addr string, token string, agent Agent) error {
 	log.Info().Msgf("sending join request to: %s", addr)
 
-	nodeName := name
+	if s.serverClient == nil {
+		s.serverClient = serverclient.NewClient(addr, token)
+	}
+
+	nodeName := agent.NodeName
 	if nodeName == "" {
 		h, err := os.Hostname()
 		if err != nil {
@@ -159,15 +163,13 @@ func (s *Service) Join(ctx context.Context, addr string, token string, name stri
 		}
 	}
 
+	//s.serverClient = serverclient.NewClient(addr, token)
+
 	joinReq := serverclient.JoinRequest{
 		NodeName:   nodeName,
-		ClientAddr: clientAddr,
+		ClientAddr: agent.ClientAddr,
+		Labels:     agent.Labels,
 	}
-
-	//if s.serverClient == nil {
-	//	s.serverClient = serverclient.NewClient(addr, token)
-	//}
-	s.serverClient = serverclient.NewClient(addr, token)
 
 	if err := s.serverClient.JoinRequest(ctx, joinReq); err != nil {
 		return err
@@ -185,6 +187,7 @@ func (s *Service) Join(ctx context.Context, addr string, token string, name stri
 }
 
 func (s *Service) Healthcheck(ctx context.Context) error {
+	// TODO check client(s) and report status
 	return nil
 }
 
@@ -251,15 +254,13 @@ func (s *Service) StartTask(t task.Task) error {
 		opts["tags"] = t.Tags
 	}
 
-	for _, c := range s.clients {
-		c := c
-
+	for _, client := range s.clients {
 		sender.Go(func() error {
-			log.Debug().Msgf("add torrent %s to %s", t.Name, c.Name)
+			log.Debug().Msgf("add torrent %s to %s", t.Name, client.Name)
 
 			// send downloads
-			if err := c.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, opts); err != nil {
-				log.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, c.Name)
+			if err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, opts); err != nil {
+				log.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
 				return err
 			}
 
@@ -274,8 +275,8 @@ func (s *Service) StartTask(t task.Task) error {
 			//			MaxAttempts:     50,
 			//			DeleteOnFailure: false,
 			//		}
-			//		if err := c.Client.ReannounceTorrentWithRetry(context.Background(), req.InfoHash, &options); err != nil {
-			//			log.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", req.InfoHash, c.Name)
+			//		if err := client.Client.ReannounceTorrentWithRetry(context.Background(), req.InfoHash, &options); err != nil {
+			//			log.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", req.InfoHash, client.Name)
 			//		}
 			//	}(req)
 			//}
@@ -329,9 +330,9 @@ func (s *Service) CollectStats() {
 	}
 }
 
-func (s *Service) GetStatsFull() *stats.Stats {
+func (s *Service) GetStatsFull(ctx context.Context) *stats.Stats {
 	s.stats = stats.GetStats()
-	s.GetClientStats()
+	s.GetClientStats(ctx)
 	return s.stats
 }
 
@@ -339,45 +340,10 @@ func (s *Service) GetStats() *stats.Stats {
 	log.Trace().Msg("collecting stats")
 	s.stats = stats.GetStats()
 
-	// TODO use errgroup
-	//for _, client := range s.clients {
-	//	l := log.With().Str("client", client.Name).Logger()
-	//
-	//
-	//	l.Trace().Msg("check disk per path for client")
-	//
-	//	for _, storage := range client.Rules.Storage {
-	//		l.Trace().Msgf("check disk for path %q", storage.Path)
-	//
-	//		s.stats.DiskPathStats[storage.Path] = stats.GetDiskInfoByPath(storage.Path)
-	//	}
-	//
-	//	l.Trace().Msg("get active torrents for client")
-	//
-	//	t, err := client.Client.GetTorrentsActiveDownloadsCtx(context.Background())
-	//	if err != nil {
-	//		l.Error().Err(err).Msgf("could not load active torrents for client: %q", client.Name)
-	//		continue
-	//	}
-	//
-	//	l.Trace().Msgf("found %d active torrents for client", len(t))
-	//
-	//	ct := stats.ClientStats{
-	//		ClientActiveDownloads: len(t),
-	//		ClientReady:           len(t) < client.Rules.Torrents.MaxActiveDownloads,
-	//	}
-	//
-	//	l.Trace().Msgf("client ready: %t", ct.ClientReady)
-	//
-	//	s.stats.ClientStats[client.Name] = ct
-	//}
-	//
-	//s.taskCount = s.stats.TaskCount
-
 	return s.stats
 }
 
-func (s *Service) GetClientStats() *stats.Stats {
+func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 	log.Trace().Msg("collecting stats")
 	//s.stats = stats.GetStats()
 
@@ -395,20 +361,21 @@ func (s *Service) GetClientStats() *stats.Stats {
 
 		l.Trace().Msg("get active torrents for client")
 
-		t, err := client.Client.GetTorrentsActiveDownloadsCtx(context.Background())
+		activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
 		if err != nil {
 			l.Error().Err(err).Msgf("could not load active torrents for client")
 			continue
 		}
 
-		l.Trace().Msgf("found %d active torrents for client", len(t))
+		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
 
 		ct := stats.ClientStats{
-			ClientActiveDownloads: len(t),
-			ClientReady:           len(t) < client.Rules.Torrents.MaxActiveDownloads,
+			ActiveDownloads: len(activeDownloads),
+			Ready:           len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
 		}
 
-		l.Trace().Msgf("client ready: %t", ct.ClientReady)
+		l.Trace().Msgf("[%d/%d] active downloads, status ready: %t", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Ready)
+		l.Debug().Msgf("client ready: %t", ct.Ready)
 
 		s.stats.ClientStats[name] = ct
 	}
@@ -416,4 +383,8 @@ func (s *Service) GetClientStats() *stats.Stats {
 	s.taskCount = s.stats.TaskCount
 
 	return s.stats
+}
+
+func (s *Service) GetLabels() map[string]string {
+	return s.cfg.Agent.Labels
 }

@@ -61,76 +61,98 @@ func (s *APIServer) Handler() http.Handler {
 	r.Use(mw.RequestLogger)
 
 	r.Route("/api/v1/", func(r chi.Router) {
-		// make sure request is authenticated
-		r.Use(mw.IsAuthenticated(s.token))
-
-		r.Route("/node", func(r chi.Router) {
-			r.Post("/register", func(w http.ResponseWriter, r *http.Request) {
-				req := RegisterRequest{}
-
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					render.Status(r, http.StatusInternalServerError)
-					return
-				}
-
-				if token := r.Context().Value("token").(string); token != "" {
-					req.Token = token
-				}
-
-				if err := s.service.OnRegister(r.Context(), req); err != nil {
-					render.Status(r, http.StatusInternalServerError)
-					return
-				}
-
-				render.Status(r, http.StatusCreated)
-				render.PlainText(w, r, "OK")
+		r.Route("/healthz", func(r chi.Router) {
+			r.Get("/liveness", func(w http.ResponseWriter, r *http.Request) {
+				render.Status(r, http.StatusOK)
 			})
 
-			r.Post("/deregister", func(w http.ResponseWriter, r *http.Request) {
-				req := DeregisterRequest{}
-
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					render.Status(r, http.StatusInternalServerError)
-					return
-				}
-
-				if err := s.service.Deregister(r.Context(), req); err != nil {
-					render.Status(r, http.StatusInternalServerError)
-					return
-				}
+			r.Get("/readiness", func(w http.ResponseWriter, r *http.Request) {
+				//if err := s.service.Healthcheck(r.Context()); err != nil {
+				//	render.Status(r, http.StatusFailedDependency)
+				//	return
+				//}
 
 				render.Status(r, http.StatusOK)
-				render.PlainText(w, r, "OK")
 			})
 		})
 
-		r.Route("/tasks", func(r chi.Router) {
-			r.Post("/", func(w http.ResponseWriter, r *http.Request) {
-				//te := task.NewTask()
-				te := task.NewEvent()
-				//te.Task = t
+		r.Group(func(r chi.Router) {
+			// make sure request is authenticated
+			r.Use(mw.IsAuthenticated(s.token))
 
-				if err := json.NewDecoder(r.Body).Decode(&te.Task); err != nil {
-					render.Status(r, http.StatusInternalServerError)
-					return
-				}
+			r.Route("/node", func(r chi.Router) {
+				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+					nodes := s.service.GetNodes()
+					render.JSON(w, r, nodes)
+				})
 
-				ctx := context.WithoutCancel(r.Context())
+				r.Post("/register", func(w http.ResponseWriter, r *http.Request) {
+					req := RegisterRequest{}
 
-				s.service.AddTask(ctx, te)
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						render.Status(r, http.StatusInternalServerError)
+						return
+					}
 
-				render.Status(r, http.StatusCreated)
+					if token := r.Context().Value("token").(string); token != "" {
+						req.Token = token
+					}
+
+					if err := s.service.OnRegister(r.Context(), req); err != nil {
+						render.Status(r, http.StatusInternalServerError)
+						return
+					}
+
+					render.Status(r, http.StatusCreated)
+					render.PlainText(w, r, "OK")
+				})
+
+				r.Post("/deregister", func(w http.ResponseWriter, r *http.Request) {
+					req := DeregisterRequest{}
+
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						render.Status(r, http.StatusInternalServerError)
+						return
+					}
+
+					if err := s.service.Deregister(r.Context(), req); err != nil {
+						render.Status(r, http.StatusInternalServerError)
+						return
+					}
+
+					render.Status(r, http.StatusOK)
+					render.PlainText(w, r, "OK")
+				})
 			})
 
-			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-				if err := getTasksHandler(r.Context()); err != nil {
-					render.Status(r, http.StatusInternalServerError)
-					return
-				}
+			r.Route("/tasks", func(r chi.Router) {
+				r.Post("/", func(w http.ResponseWriter, r *http.Request) {
+					//te := task.NewTask()
+					te := task.NewEvent()
+					//te.Task = t
 
-				render.PlainText(w, r, "get tasks")
-				render.Status(r, http.StatusOK)
-				return
+					if err := json.NewDecoder(r.Body).Decode(&te.Task); err != nil {
+						render.Status(r, http.StatusInternalServerError)
+						return
+					}
+
+					ctx := context.WithoutCancel(r.Context())
+
+					s.service.AddTask(ctx, te)
+
+					render.Status(r, http.StatusCreated)
+				})
+
+				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+					if err := getTasksHandler(r.Context()); err != nil {
+						render.Status(r, http.StatusInternalServerError)
+						return
+					}
+
+					render.PlainText(w, r, "get tasks")
+					render.Status(r, http.StatusOK)
+					return
+				})
 			})
 		})
 	})

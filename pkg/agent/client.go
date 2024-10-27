@@ -5,16 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/autobrr/distribrr/pkg/version"
-	"github.com/rs/xid"
 	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
+	"github.com/autobrr/distribrr/pkg/version"
 
 	"github.com/pkg/errors"
+	"github.com/rs/xid"
 )
 
 const DefaultTimeout = 15 * time.Second
@@ -39,8 +39,66 @@ func NewClient(addr, name, token string) *Client {
 }
 
 func (c *Client) HealthCheck(ctx context.Context) error {
-	// TODO ping clients
+	reqUrl, err := c.buildUrl(c.addr, "healthz/readiness", nil)
+	if err != nil {
+		return errors.Wrapf(err, "could not build URL: %s", c.name)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
+	if err != nil {
+		return errors.Wrapf(err, "could not create request for node: %s", c.name)
+	}
+
+	c.setHeaders(ctx, req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return errors.Wrapf(err, "error during request for node: %s", c.name)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("node: %s healthcheck unexpected status: %d", c.name, resp.StatusCode)
+	}
+
 	return nil
+}
+
+func (c *Client) GetLabels(ctx context.Context) (map[string]string, error) {
+	return c.getLabels(ctx)
+}
+
+func (c *Client) getLabels(ctx context.Context) (map[string]string, error) {
+	reqUrl, err := c.buildUrl(c.addr, "labels", nil)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not build URL: %s", c.name)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not create request for node: %s", c.name)
+	}
+
+	c.setHeaders(ctx, req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, errors.Wrapf(err, "error during request for node: %s", c.name)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+	}
+
+	var data map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+
+	return data, nil
 }
 
 func (c *Client) GetStats(ctx context.Context) (*stats.Stats, error) {
