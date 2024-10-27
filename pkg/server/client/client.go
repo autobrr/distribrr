@@ -37,6 +37,7 @@ type JoinRequest struct {
 	NodeName   string            `json:"node_name"`
 	ClientAddr string            `json:"client_addr"`
 	Labels     map[string]string `yaml:"labels"`
+	Token      string            `json:"token"`
 }
 
 type JoinResponse struct {

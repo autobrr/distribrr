@@ -119,7 +119,7 @@ func (s *Service) registerAgentWithServer(tickerDuration time.Duration) error {
 	// Create a new context that will be done after tickerDuration
 	ctx, cancel := context.WithTimeout(context.Background(), tickerDuration)
 	defer cancel()
-	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent); err != nil {
+	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent, s.cfg.Http.Token); err != nil {
 		return err
 	}
 
@@ -145,7 +145,7 @@ func (s *Service) Deregister() error {
 }
 
 // Join worker to manager
-func (s *Service) Join(ctx context.Context, addr string, token string, agent Agent) error {
+func (s *Service) Join(ctx context.Context, addr string, token string, agent Agent, agentToken string) error {
 	log.Info().Msgf("sending join request to: %s", addr)
 
 	if s.serverClient == nil {
@@ -170,6 +170,7 @@ func (s *Service) Join(ctx context.Context, addr string, token string, agent Age
 		NodeName:   nodeName,
 		ClientAddr: agent.ClientAddr,
 		Labels:     agent.Labels,
+		Token:      agentToken,
 	}
 
 	if err := s.serverClient.JoinRequest(ctx, joinReq); err != nil {

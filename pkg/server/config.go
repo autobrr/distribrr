@@ -27,7 +27,7 @@ type Config struct {
 }
 
 type Http struct {
-	Host  string `yaml:"addr"`
+	Host  string `yaml:"host"`
 	Port  string `yaml:"port"`
 	Token string `yaml:"token"`
 }
