@@ -4,7 +4,7 @@ go 1.23.1
 
 require (
 	github.com/anacrolix/torrent v1.57.1
-	github.com/autobrr/go-qbittorrent v1.9.0
+	github.com/autobrr/go-qbittorrent v1.10.0
 	github.com/avast/retry-go v3.0.0+incompatible
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/c9s/goprocinfo v0.0.0-20210130143923-c95fcf8c64a8
@@ -18,7 +18,7 @@ require (
 	github.com/rs/xid v1.6.0
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/cobra v1.8.1
-	golang.org/x/net v0.23.0
+	golang.org/x/net v0.29.0
 	golang.org/x/sync v0.8.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -51,10 +51,10 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tcnksm/go-gitconfig v0.1.2 // indirect
 	github.com/ulikunitz/xz v0.5.11 // indirect
-	golang.org/x/crypto v0.21.0 // indirect
+	golang.org/x/crypto v0.27.0 // indirect
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
 	golang.org/x/oauth2 v0.16.0 // indirect
-	golang.org/x/sys v0.18.0 // indirect
+	golang.org/x/sys v0.25.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.32.0 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
