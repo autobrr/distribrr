@@ -65,6 +65,7 @@ func (s *APIServer) Handler() http.Handler {
 	r.Route("/api/v1/", func(r chi.Router) {
 		r.Route("/healthz", func(r chi.Router) {
 			r.Get("/liveness", func(w http.ResponseWriter, r *http.Request) {
+				render.PlainText(w, r, "OK")
 				render.Status(r, http.StatusOK)
 			})
 
@@ -74,6 +75,7 @@ func (s *APIServer) Handler() http.Handler {
 					return
 				}
 
+				render.PlainText(w, r, "OK")
 				render.Status(r, http.StatusOK)
 			})
 		})
