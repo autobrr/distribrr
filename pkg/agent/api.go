@@ -57,6 +57,11 @@ func (s *APIServer) Handler() http.Handler {
 	r.Use(mw.CorrelationID)
 	r.Use(mw.RequestLogger)
 
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		render.PlainText(w, r, "OK")
+		render.Status(r, http.StatusOK)
+	})
+
 	r.Route("/api/v1/", func(r chi.Router) {
 		r.Route("/healthz", func(r chi.Router) {
 			r.Get("/liveness", func(w http.ResponseWriter, r *http.Request) {
