@@ -1,6 +1,8 @@
 package scheduler
 
-import "testing"
+import (
+	"testing"
+)
 
 func Test_matchLabels(t *testing.T) {
 	type args struct {
@@ -12,7 +14,6 @@ func Test_matchLabels(t *testing.T) {
 		args args
 		want bool
 	}{
-		// TODO: Add test cases.
 		{
 			name: "",
 			args: args{

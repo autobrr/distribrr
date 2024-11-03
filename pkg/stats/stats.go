@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"github.com/autobrr/go-qbittorrent"
 	"github.com/c9s/goprocinfo/linux"
 	"github.com/rs/zerolog/log"
 )
@@ -10,8 +11,14 @@ type ClientStatsReader interface {
 }
 
 type ClientStats struct {
-	ActiveDownloads int  `json:"active_downloads"`
-	Ready           bool `json:"ready"` // Ready is true if ActiveDownloads is less than configured
+	ActiveDownloadsCount      int                   `json:"active_downloads_count"`
+	ActiveDownloads           []qbittorrent.Torrent `json:"active_downloads"`
+	MaxActiveDownloadsAllowed int                   `json:"max_active_downloads_allowed"`
+	Ready                     bool                  `json:"ready"` // Ready is true if ActiveDownloadsCount is less than configured
+}
+
+func (c *ClientStats) HasAvailableSlot() bool {
+	return c.ActiveDownloadsCount < c.MaxActiveDownloadsAllowed
 }
 
 type Stats struct {
@@ -68,8 +75,8 @@ func (s *Stats) CpuUsage() float64 {
 
 func (s *Stats) SetClientActiveDownloads(client string, count int) uint64 {
 	s.ClientStats[client] = ClientStats{
-		ActiveDownloads: count,
-		Ready:           false,
+		ActiveDownloadsCount: count,
+		Ready:                false,
 	}
 	return uint64(count)
 }

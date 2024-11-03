@@ -383,8 +383,10 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
 
 		ct := stats.ClientStats{
-			ActiveDownloads: len(activeDownloads),
-			Ready:           len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
+			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
+			ActiveDownloadsCount:      len(activeDownloads),
+			ActiveDownloads:           activeDownloads,
+			Ready:                     len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
 		}
 
 		l.Trace().Msgf("[%d/%d] active downloads, status ready: %t", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Ready)
