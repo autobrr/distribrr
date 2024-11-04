@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/autobrr/distribrr/pkg/node"
+	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/rs/zerolog/log"
@@ -50,14 +51,14 @@ nodeLoop:
 
 		// TODO check available disk
 
-		stats, err := n.GetStats(ctx)
+		stat, err := n.GetStats(ctx)
 		if err != nil {
 			log.Error().Err(err).Msgf("could not get stats for node %s", n.Name)
 			continue
 		}
 
-		for _, clientStats := range stats.ClientStats {
-			if clientStats.Status != node.StatusReady {
+		for _, clientStats := range stat.ClientStats {
+			if clientStats.Status != stats.ClientStatusReady {
 				continue nodeLoop
 			}
 		}
@@ -124,19 +125,16 @@ func (r *LeastActive) Pick(scores map[string]float64, candidates []*node.Node) [
 }
 
 func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, number int) []*node.Node {
+	if len(candidates) == 0 {
+		return nil
+	}
+
 	// select amount of candidates if greater than 0
 	//if number > 0 && len(candidates) > number {
 	if number > 0 && number > len(candidates) {
 		candidates = candidates[:number]
 		return candidates
 	}
-
-	//if number > 0 {
-	//	if len(candidates) > number {
-	//		candidates = candidates[:number]
-	//	}
-	//}
-	//return candidates
 
 	// Create a ByScore instance
 	byScore := ByScore{
@@ -147,25 +145,7 @@ func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, 
 	// Sort the slice using sort.Sort
 	sort.Sort(byScore)
 
-	//minCost := 0.00
-	//var bestNodes []*node.Node
-	//for idx, candidate := range candidates {
-	//	n := candidate
-	//	if idx == 0 {
-	//		minCost = scores[n.Name]
-	//		bestNodes = append(bestNodes, n)
-	//		continue
-	//	}
-	//
-	//	if scores[n.Name] < minCost {
-	//		minCost = scores[n.Name]
-	//		bestNodes = append(bestNodes, n)
-	//	}
-	//}
-
 	return byScore.nodes[:number]
-
-	//return bestNodes
 }
 
 // ByScore implements sort.Interface based on the score map
