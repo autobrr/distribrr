@@ -336,7 +336,7 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 	// hardcoded scheduler for now
 	var sc scheduler.LeastActive
 
-	// get candidates
+	// select candidates
 	candidates := sc.SelectCandidateNodes(ctx, t, s.workerNodes)
 	if len(candidates) == 0 {
 		return nil, nil
