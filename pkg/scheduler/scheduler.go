@@ -31,6 +31,7 @@ type LeastActive struct {
 func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) []*node.Node {
 	var candidates []*node.Node
 
+nodeLoop:
 	for _, n := range nodes {
 		if n.Status != node.StatusReady {
 			continue
@@ -47,11 +48,19 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 			continue
 		}
 
-		//for _, clientStats := range n.Stats.ClientStats {
-		//	if !clientStats.Ready {
-		//		continue
-		//	}
-		//}
+		// TODO check available disk
+
+		stats, err := n.GetStats(ctx)
+		if err != nil {
+			log.Error().Err(err).Msgf("could not get stats for node %s", n.Name)
+			continue
+		}
+
+		for _, clientStats := range stats.ClientStats {
+			if clientStats.Status != node.StatusReady {
+				continue nodeLoop
+			}
+		}
 
 		candidates = append(candidates, n)
 	}
@@ -75,37 +84,25 @@ func (r *LeastActive) Score(ctx context.Context, t task.Task, nodes []*node.Node
 	nodeScores := make(map[string]float64)
 
 	for _, n := range nodes {
-		stats, err := n.GetStats(ctx)
-		if err != nil {
-			log.Error().Err(err).Msgf("could not get stats for node %s", n.Name)
-			continue
-		}
-
-		for _, clientStats := range stats.ClientStats {
-			if !clientStats.Ready {
-				nodeScores[n.Name] = 100.0
-				continue
-			}
-
+		for _, clientStats := range n.Stats.ClientStats {
 			torrentScore := 0.0
 
 			// score with torrents in mind
 			// timeLeft, percentage done, speeds
 			for _, torrent := range clientStats.ActiveDownloads {
-				if torrent.Progress > 0.5 && torrent.ETA < 30 {
+				if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
 					// score
 					torrentScore += 1.0
 					continue
 				}
 
-				torrentScore += 5.0
+				//torrentScore += 10.0
+				torrentScore += torrent.Progress*100 + float64(torrent.ETA)
 			}
 
-			clientCost := math.Pow(LIEB, (float64(clientStats.ActiveDownloadsCount+1))/float64(clientStats.MaxActiveDownloadsAllowed)) + torrentScore
+			clientCost := math.Pow(LIEB, (float64(clientStats.ActiveDownloadsCount+1))/float64(clientStats.MaxActiveDownloadsAllowed))
 
-			nodeScores[n.Name] = clientCost
-
-			// check disk here or select?
+			nodeScores[n.Name] = clientCost + math.Pow(LIEB, torrentScore)
 		}
 	}
 

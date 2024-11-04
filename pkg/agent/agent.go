@@ -357,8 +357,7 @@ func (s *Service) GetStats() *stats.Stats {
 }
 
 func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
-	log.Trace().Msg("collecting stats")
-	//s.stats = stats.GetStats()
+	log.Trace().Msg("collecting client stats")
 
 	// TODO use errgroup
 	for name, client := range s.clients {
@@ -374,23 +373,47 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 
 		l.Trace().Msg("get active torrents for client")
 
+		status := stats.ClientStatusNotReady
+
 		activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
 		if err != nil {
 			l.Error().Err(err).Msgf("could not load active torrents for client")
 			continue
 		}
 
+		if len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads {
+			status = stats.ClientStatusReady
+		} else if len(activeDownloads) > client.Rules.Torrents.MaxActiveDownloads {
+			status = stats.ClientStatusNotReady
+		} else if len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
+			status = stats.ClientStatusNotReady
+
+			l.Debug().Msgf("max active downloads (%d) reached, checking individual torrents...", client.Rules.Torrents.MaxActiveDownloads)
+
+			for _, torrent := range activeDownloads {
+				// if progress is above 75% and ETA is less than 60 seconds then set status to Ready
+				if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
+					status = stats.ClientStatusReady
+					break
+				}
+			}
+
+			//l.Debug().Msgf("active downloads: %d, max active downloads: %d, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, status)
+		}
+
 		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
 
 		ct := stats.ClientStats{
+			Name:                      name,
 			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
 			ActiveDownloadsCount:      len(activeDownloads),
 			ActiveDownloads:           activeDownloads,
 			Ready:                     len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
+			Status:                    status,
 		}
 
-		l.Trace().Msgf("[%d/%d] active downloads, status ready: %t", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Ready)
-		l.Debug().Msgf("client ready: %t", ct.Ready)
+		l.Trace().Msgf("[%d/%d] active downloads, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Status)
+		l.Debug().Msgf("client status: %s", ct.Status)
 
 		s.stats.ClientStats[name] = ct
 	}
