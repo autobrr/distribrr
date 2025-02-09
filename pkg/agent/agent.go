@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
-	"github.com/autobrr/distribrr/internal/domain"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/autobrr/distribrr/internal/domain"
 	"github.com/autobrr/distribrr/pkg/server/client"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"

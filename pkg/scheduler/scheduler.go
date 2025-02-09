@@ -9,6 +9,7 @@ import (
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
+	"github.com/autobrr/go-qbittorrent"
 	"github.com/rs/zerolog/log"
 )
 
@@ -83,31 +84,55 @@ func checkLabels(taskLabels map[string]string, nodeLabels map[string]string) boo
 
 func (r *LeastActive) Score(ctx context.Context, t task.Task, nodes []*node.Node) map[string]float64 {
 	nodeScores := make(map[string]float64)
+	baseScore := 100.0    // Start with a high base score
+	noActiveBonus := 20.0 // Bonus for having no active downloads
 
 	for _, n := range nodes {
+		score := baseScore
+
 		for _, clientStats := range n.Stats.ClientStats {
-			torrentScore := 0.0
-
-			// score with torrents in mind
-			// timeLeft, percentage done, speeds
-			for _, torrent := range clientStats.ActiveDownloads {
-				if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
-					// score
-					torrentScore += 1.0
-					continue
-				}
-
-				//torrentScore += 10.0
-				torrentScore += torrent.Progress*100 + float64(torrent.ETA)
+			if clientStats.ActiveDownloadsCount == 0 {
+				// Bonus for having no active downloads
+				score += noActiveBonus
+				continue
 			}
 
-			clientCost := math.Pow(LIEB, (float64(clientStats.ActiveDownloadsCount+1))/float64(clientStats.MaxActiveDownloadsAllowed))
-
-			nodeScores[n.Name] = clientCost + math.Pow(LIEB, torrentScore)
+			// Calculate penalties for each active download
+			for _, torrent := range clientStats.ActiveDownloads {
+				penalty := calculateTorrentPenalty(torrent)
+				score -= penalty
+			}
 		}
+
+		nodeScores[n.Name] = score
 	}
 
 	return nodeScores
+}
+
+// calculateTorrentPenalty determines the penalty for a single torrent based on its progress and ETA
+func calculateTorrentPenalty(torrent qbittorrent.Torrent) float64 {
+	const (
+		// 24 hours in seconds as max ETA
+		maxETASeconds  = 24 * 60 * 60
+		basePenalty    = 10.0
+		progressWeight = 0.7 // Weight for progress contribution
+		etaWeight      = 0.3 // Weight for ETA contribution
+	)
+
+	// Progress penalty (less penalty for higher progress)
+	// Progress is between 0 and 1 (0% to 100%)
+	progressPenalty := (1 - torrent.Progress) * progressWeight * basePenalty
+
+	// ETA penalty (more penalty for higher ETA)
+	etaPenalty := 0.0
+	if torrent.ETA > 0 {
+		// Normalize ETA (in seconds) against maxETASeconds
+		normalizedETA := math.Min(float64(torrent.ETA), float64(maxETASeconds)) / float64(maxETASeconds)
+		etaPenalty = normalizedETA * etaWeight * basePenalty
+	}
+
+	return progressPenalty + etaPenalty
 }
 
 func (r *LeastActive) Pick(scores map[string]float64, candidates []*node.Node) []*node.Node {
@@ -163,5 +188,6 @@ func (bs ByScore) Swap(i, j int) {
 }
 
 func (bs ByScore) Less(i, j int) bool {
-	return bs.scores[bs.nodes[i].Name] < bs.scores[bs.nodes[j].Name]
+	//return bs.scores[bs.nodes[i].Name] < bs.scores[bs.nodes[j].Name]
+	return bs.scores[bs.nodes[i].Name] > bs.scores[bs.nodes[j].Name]
 }
