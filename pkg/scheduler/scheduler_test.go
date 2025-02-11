@@ -204,9 +204,8 @@ func TestLeastActive_Score(t *testing.T) {
 				Name:       tt.fields.Name,
 				LastWorker: tt.fields.LastWorker,
 			}
-			candidates := r.SelectCandidateNodes(tt.args.ctx, tt.args.t, tt.args.nodes)
 
-			got := r.Score(tt.args.ctx, tt.args.t, candidates)
+			got := r.Score(tt.args.ctx, tt.args.t, tt.args.nodes)
 			assert.Equal(t, tt.want, got)
 
 			//nodes := r.PickN(got, candidates, 2)
