@@ -1,10 +1,11 @@
 module github.com/autobrr/distribrr
 
 go 1.23.1
+toolchain go1.24.1
 
 require (
-	github.com/anacrolix/torrent v1.58.0
-	github.com/autobrr/go-qbittorrent v1.11.0
+	github.com/anacrolix/torrent v1.58.1
+	github.com/autobrr/go-qbittorrent v1.12.0
 	github.com/avast/retry-go v3.0.0+incompatible
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/c9s/goprocinfo v0.0.0-20210130143923-c95fcf8c64a8
@@ -16,11 +17,11 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/rhysd/go-github-selfupdate v1.2.3
 	github.com/rs/xid v1.6.0
-	github.com/rs/zerolog v1.33.0
-	github.com/spf13/cobra v1.8.1
+	github.com/rs/zerolog v1.34.0
+	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/net v0.30.0
-	golang.org/x/sync v0.11.0
+	golang.org/x/net v0.39.0
+	golang.org/x/sync v0.13.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -52,13 +53,13 @@ require (
 	github.com/onsi/gomega v1.17.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/tcnksm/go-gitconfig v0.1.2 // indirect
 	github.com/ulikunitz/xz v0.5.11 // indirect
-	golang.org/x/crypto v0.28.0 // indirect
-	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
+	golang.org/x/crypto v0.37.0 // indirect
+	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f // indirect
 	golang.org/x/oauth2 v0.16.0 // indirect
-	golang.org/x/sys v0.26.0 // indirect
+	golang.org/x/sys v0.32.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
