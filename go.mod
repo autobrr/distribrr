@@ -1,6 +1,6 @@
 module github.com/autobrr/distribrr
 
-go 1.23.1
+go 1.26
 
 require (
 	github.com/anacrolix/torrent v1.58.0
