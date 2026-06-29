@@ -93,21 +93,24 @@ func (s *APIServer) Handler() http.Handler {
 					te := task.Event{}
 
 					if err := json.NewDecoder(r.Body).Decode(&te); err != nil {
-						render.Status(r, http.StatusInternalServerError)
+						render.Status(r, http.StatusBadRequest)
+						render.JSON(w, r, map[string]string{"error": "could not decode request body"})
 						return
 					}
 
-					//s.service.AddTask(te.Task)
 					if err := s.service.StartTask(te.Task); err != nil {
 						render.Status(r, http.StatusInternalServerError)
+						render.JSON(w, r, map[string]string{"error": err.Error()})
 						return
 					}
 
 					render.Status(r, http.StatusCreated)
+					render.PlainText(w, r, "OK")
 				})
 
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 					render.Status(r, http.StatusOK)
+					render.PlainText(w, r, "OK")
 				})
 			})
 

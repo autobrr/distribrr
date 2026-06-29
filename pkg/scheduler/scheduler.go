@@ -154,11 +154,14 @@ func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, 
 		return nil
 	}
 
-	// select amount of candidates if greater than 0
-	//if number > 0 && len(candidates) > number {
-	if number > 0 && number > len(candidates) {
-		candidates = candidates[:number]
-		return candidates
+	// default to a single replica when the caller did not specify one
+	if number <= 0 {
+		number = 1
+	}
+
+	// never pick more nodes than we actually have
+	if number > len(candidates) {
+		number = len(candidates)
 	}
 
 	// Create a ByScore instance

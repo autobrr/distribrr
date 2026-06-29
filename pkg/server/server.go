@@ -268,14 +268,10 @@ func (s *Service) ProcessTasks() {
 	}()
 }
 
-func (s *Service) SendWork(ctx context.Context, te task.Event) {
-	//l := logger.Get()
+func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 	l := logger.GetWithCtx(ctx)
 
-	l.Debug().Msgf("recieved task: %+v", te.Task)
-
-	// TODO get tasks
-	//te := task.NewEvent()
+	l.Debug().Msgf("received task: %+v", te.Task)
 
 	l.Trace().Msg("selecting workers")
 
@@ -283,21 +279,19 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) {
 	nodes, err := s.selectWorkers(ctx, te.Task)
 	if err != nil {
 		l.Error().Err(err).Msg("error selecting nodes")
-		return
+		return errors.Wrap(err, "could not select nodes for task")
 	}
 
 	if len(nodes) == 0 {
 		l.Info().Msg("found no nodes to send work to")
-		return
+		return errors.New("no ready nodes available to handle the task")
 	}
 
 	l.Debug().Msgf("selected %d nodes", len(nodes))
 
-	// proxy download to only download once
+	// TODO proxy download to only download once
 
 	fetcher := errgroup.Group{}
-
-	nodesOK := 0
 
 	// post to worker nodes
 	for _, n := range nodes {
@@ -313,23 +307,18 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) {
 
 			subLogger.Info().Msgf("successfully sent task to %s", n.Name)
 
-			nodesOK++
-
 			return nil
 		})
 	}
 
 	if err := fetcher.Wait(); err != nil {
 		l.Error().Err(err).Msg("error sending tasks to nodes")
-		return
+		return errors.Wrap(err, "failed to send task to one or more nodes")
 	}
 
-	if nodesOK == 0 {
-		l.Warn().Msg("found 0 ready nodes")
-		return
-	}
+	l.Info().Msgf("successfully scheduled download on %d nodes", len(nodes))
 
-	l.Info().Msgf("successfully scheduled download on %d nodes", nodesOK)
+	return nil
 }
 
 func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node, error) {
@@ -385,10 +374,10 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 //	return nodes, nil
 //}
 
-func (s *Service) AddTask(ctx context.Context, te task.Event) {
+func (s *Service) AddTask(ctx context.Context, te task.Event) error {
 	// TODO add to queue
 
-	s.SendWork(ctx, te)
+	return s.SendWork(ctx, te)
 }
 
 func (s *Service) QueueTask(ctx context.Context, te task.Event) {

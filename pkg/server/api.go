@@ -134,20 +134,26 @@ func (s *APIServer) Handler() http.Handler {
 
 			r.Route("/tasks", func(r chi.Router) {
 				r.Post("/", func(w http.ResponseWriter, r *http.Request) {
-					//te := task.NewTask()
 					te := task.NewEvent()
-					//te.Task = t
 
 					if err := json.NewDecoder(r.Body).Decode(&te.Task); err != nil {
-						render.Status(r, http.StatusInternalServerError)
+						render.Status(r, http.StatusBadRequest)
+						render.JSON(w, r, map[string]string{"error": "could not decode request body"})
 						return
 					}
 
+					// detach from the request so dispatch isn't cancelled if the
+					// caller disconnects, while still carrying request values.
 					ctx := context.WithoutCancel(r.Context())
 
-					s.service.AddTask(ctx, te)
+					if err := s.service.AddTask(ctx, te); err != nil {
+						render.Status(r, http.StatusBadGateway)
+						render.JSON(w, r, map[string]string{"error": err.Error()})
+						return
+					}
 
 					render.Status(r, http.StatusCreated)
+					render.PlainText(w, r, "OK")
 				})
 
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
