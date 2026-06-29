@@ -47,6 +47,10 @@ func IsAuthenticated(apiKey string) func(next http.Handler) http.Handler {
 				ctx := context.WithValue(r.Context(), "token", key)
 				r = r.WithContext(ctx)
 
+			} else {
+				// no credential supplied at all: fail closed
+				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				return
 			}
 
 			next.ServeHTTP(w, r)
