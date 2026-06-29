@@ -18,7 +18,7 @@ type Task struct {
 	Memory             int64             `json:"memory"`
 	Disk               int64             `json:"disk"`
 	SchedulerType      string            `json:"scheduler_type"`
-	MaxAllowedReplicas int               `json:"replicas"`
+	MaxAllowedReplicas int               `json:"max_replicas"`
 	Labels             map[string]string `json:"labels"`
 	Nodes              []string          `json:"nodes"`
 	ForceAdd           bool              `json:"force_add"`

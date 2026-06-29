@@ -207,9 +207,44 @@ func TestLeastActive_Score(t *testing.T) {
 
 			got := r.Score(tt.args.ctx, tt.args.t, tt.args.nodes)
 			assert.Equal(t, tt.want, got)
-
-			//nodes := r.PickN(got, candidates, 2)
-			//assert.Equal(t, 2, len(nodes))
 		})
 	}
+}
+
+func TestLeastActive_PickN(t *testing.T) {
+	newNodes := func() []*node.Node {
+		return []*node.Node{{Name: "node0"}, {Name: "node1"}, {Name: "node2"}}
+	}
+	scores := map[string]float64{"node0": 100, "node1": 120, "node2": 90}
+
+	r := &LeastActive{}
+
+	tests := []struct {
+		name   string
+		number int
+		want   int
+	}{
+		{name: "zero defaults to one", number: 0, want: 1},
+		{name: "negative defaults to one", number: -1, want: 1},
+		{name: "exact count", number: 2, want: 2},
+		{name: "all nodes", number: 3, want: 3},
+		{name: "more than available is clamped", number: 5, want: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.PickN(scores, newNodes(), tt.number)
+			assert.Len(t, got, tt.want)
+		})
+	}
+
+	t.Run("no candidates returns nil", func(t *testing.T) {
+		assert.Nil(t, r.PickN(scores, nil, 2))
+	})
+
+	t.Run("picks the highest scoring node first", func(t *testing.T) {
+		got := r.PickN(scores, newNodes(), 1)
+		assert.Len(t, got, 1)
+		assert.Equal(t, "node1", got[0].Name)
+	})
 }

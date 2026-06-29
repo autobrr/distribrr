@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -197,8 +198,9 @@ func (c *Client) startTask(ctx context.Context, te *task.Event) error {
 
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("node: %s unexpected status: %d: %s", c.name, resp.StatusCode, bytes.TrimSpace(respBody))
 	}
 
 	return nil
