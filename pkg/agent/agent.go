@@ -390,49 +390,64 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 
 		l.Trace().Msg("get active torrents for client")
 
-		status := stats.ClientStatusNotReady
-
 		activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
 		if err != nil {
 			l.Error().Err(err).Msgf("could not load active torrents for client")
+
+			// can't reach the client: report it as not ready so the scheduler
+			// skips it and the reason is visible, instead of silently dropping it.
+			reasons := []stats.NotReadyReason{stats.ReasonClientUnreachable}
+			if !storageOK {
+				reasons = append(reasons, stats.ReasonDiskFull)
+			}
+
+			s.stats.ClientStats[name] = stats.ClientStats{
+				Name:                      name,
+				MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
+				Status:                    stats.ClientStatusNotReady,
+				Reasons:                   reasons,
+			}
+
 			continue
 		}
 
-		if len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads {
-			status = stats.ClientStatusReady
-		} else if len(activeDownloads) > client.Rules.Torrents.MaxActiveDownloads {
-			status = stats.ClientStatusNotReady
-		} else if len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
-			status = stats.ClientStatusNotReady
-
+		// a client is at capacity once it reaches its max active downloads, but
+		// we still allow it through if one of those downloads is nearly finished.
+		downloadsOK := len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads
+		if !downloadsOK && len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
 			l.Debug().Msgf("max active downloads (%d) reached, checking individual torrents...", client.Rules.Torrents.MaxActiveDownloads)
 
 			for _, torrent := range activeDownloads {
-				// if progress is above 75% and ETA is less than 60 seconds then set status to Ready
+				// if progress is above 75% and ETA is less than 60 seconds, treat it as a free slot
 				if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
-					status = stats.ClientStatusReady
+					downloadsOK = true
 					break
 				}
 			}
+		}
 
-			//l.Debug().Msgf("active downloads: %d, max active downloads: %d, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, status)
+		var reasons []stats.NotReadyReason
+		if !downloadsOK {
+			reasons = append(reasons, stats.ReasonMaxDownloadsReached)
+		}
+		if !storageOK {
+			reasons = append(reasons, stats.ReasonDiskFull)
+		}
+
+		status := stats.ClientStatusReady
+		if len(reasons) > 0 {
+			status = stats.ClientStatusNotReady
 		}
 
 		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
-
-		// a client that is out of storage cannot accept new downloads,
-		// regardless of available download slots
-		if !storageOK {
-			status = stats.ClientStatusNotReady
-		}
 
 		ct := stats.ClientStats{
 			Name:                      name,
 			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
 			ActiveDownloadsCount:      len(activeDownloads),
 			ActiveDownloads:           activeDownloads,
-			Ready:                     storageOK && len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
 			Status:                    status,
+			Reasons:                   reasons,
 		}
 
 		l.Trace().Msgf("[%d/%d] active downloads, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Status)
