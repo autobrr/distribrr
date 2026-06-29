@@ -1,5 +1,5 @@
 # build app
-FROM --platform=$BUILDPLATFORM golang:1.23.1-alpine3.19 AS app-builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine3.24 AS app-builder
 RUN apk add --no-cache git tzdata
 
 ENV SERVICE=distribrr
@@ -27,10 +27,10 @@ echo $GOARCH $GOOS $GOARM$GOAMD64; \
 go build -ldflags "-s -w -X github.com/autobrr/distribrr/pkg/version.Version=${VERSION} -X github.com/autobrr/distribrr/pkg/version.Commit=${REVISION} -X github.com/autobrr/distribrr/pkg/version.BuildDate=${BUILDTIME}" -o /out/bin/distribrr cmd/distribrr/main.go
 
 # build runner
-FROM alpine:latest AS runner
+FROM alpine:3.24 AS runner
 
 LABEL org.opencontainers.image.source="https://github.com/autobrr/distribrr"
-LABEL org.opencontainers.image.base.name="alpine:latest"
+LABEL org.opencontainers.image.base.name="alpine:3.24"
 
 ENV HOME="/config" \
     XDG_CONFIG_HOME="/config" \
