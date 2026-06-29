@@ -268,7 +268,7 @@ func (s *Service) StartTask(t task.Task) error {
 			// TODO read from memory
 
 			// send downloads
-			if err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, opts); err != nil {
+			if _, err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, opts); err != nil {
 				log.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
 				return err
 			}
