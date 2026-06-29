@@ -96,15 +96,15 @@ jobs:
       fail-fast: true
       matrix:
         platform:
-          - linux/386
+#          - linux/386
           - linux/amd64
           - linux/amd64/v2
           - linux/amd64/v3
           - linux/arm/v6
           - linux/arm/v7
           - linux/arm64
-          - linux/ppc64le
-          - linux/s390x
+#          - linux/ppc64le
+#          - linux/s390x
     needs: [test]
     steps:
       - name: Checkout
