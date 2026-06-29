@@ -365,10 +365,27 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 
 		l.Trace().Msg("check disk per path for client")
 
+		// storageOK stays true while every configured storage path still
+		// satisfies its minFree / maxUsage rule.
+		storageOK := true
+
 		for _, storage := range client.Rules.Storage {
 			l.Trace().Msgf("check disk for path %q", storage.Path)
 
-			s.stats.DiskPathStats[storage.Path] = stats.GetDiskInfoByPath(storage.Path)
+			disk := stats.GetDiskInfoByPath(storage.Path)
+			s.stats.DiskPathStats[storage.Path] = disk
+
+			allowed, err := storage.allows(disk.Free, disk.Used)
+			if err != nil {
+				// bad threshold config: log and treat the rule as non-binding
+				l.Warn().Err(err).Msgf("ignoring storage rule for path %q", storage.Path)
+				continue
+			}
+
+			if !allowed {
+				storageOK = false
+				l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, disk.Used)
+			}
 		}
 
 		l.Trace().Msg("get active torrents for client")
@@ -403,12 +420,18 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 
 		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
 
+		// a client that is out of storage cannot accept new downloads,
+		// regardless of available download slots
+		if !storageOK {
+			status = stats.ClientStatusNotReady
+		}
+
 		ct := stats.ClientStats{
 			Name:                      name,
 			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
 			ActiveDownloadsCount:      len(activeDownloads),
 			ActiveDownloads:           activeDownloads,
-			Ready:                     len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
+			Ready:                     storageOK && len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
 			Status:                    status,
 		}
 
