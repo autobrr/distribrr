@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -293,6 +294,8 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 
 	fetcher := errgroup.Group{}
 
+	var succeeded atomic.Int64
+
 	// post to worker nodes
 	for _, n := range nodes {
 		subLogger := l.With().Str("node", n.Name).Logger()
@@ -307,16 +310,27 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 
 			subLogger.Info().Msgf("successfully sent task to %s", n.Name)
 
+			succeeded.Add(1)
+
 			return nil
 		})
 	}
 
-	if err := fetcher.Wait(); err != nil {
-		l.Error().Err(err).Msg("error sending tasks to nodes")
-		return errors.Wrap(err, "failed to send task to one or more nodes")
+	// wait for every node, then apply best-effort semantics: the task is
+	// considered scheduled as long as at least one node accepted it.
+	err = fetcher.Wait()
+
+	ok := succeeded.Load()
+	if ok == 0 {
+		l.Error().Err(err).Msg("error sending task: all nodes failed")
+		return errors.Wrap(err, "failed to send task to any node")
 	}
 
-	l.Info().Msgf("successfully scheduled download on %d nodes", len(nodes))
+	if err != nil {
+		l.Warn().Err(err).Msgf("scheduled download on %d/%d nodes; some nodes failed", ok, len(nodes))
+	} else {
+		l.Info().Msgf("successfully scheduled download on %d nodes", ok)
+	}
 
 	return nil
 }
