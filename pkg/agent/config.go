@@ -4,6 +4,8 @@ import (
 	"os"
 
 	"github.com/autobrr/go-qbittorrent"
+
+	"github.com/dustin/go-humanize"
 	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
@@ -102,6 +104,34 @@ type StorageRule struct {
 	Tier     int    `yaml:"tier"`
 	MinFree  string `yaml:"minFree"`
 	MaxUsage string `yaml:"maxUsage"`
+}
+
+// allows reports whether a storage path with the given free and used bytes
+// satisfies the rule's minFree / maxUsage thresholds. An empty threshold is
+// ignored. A non-nil error means a configured threshold could not be parsed;
+// callers should log it and treat the rule as non-binding.
+func (r StorageRule) allows(free, used uint64) (bool, error) {
+	if r.MinFree != "" {
+		minFree, err := humanize.ParseBytes(r.MinFree)
+		if err != nil {
+			return true, errors.Wrapf(err, "invalid minFree %q for path %q", r.MinFree, r.Path)
+		}
+		if free < minFree {
+			return false, nil
+		}
+	}
+
+	if r.MaxUsage != "" {
+		maxUsage, err := humanize.ParseBytes(r.MaxUsage)
+		if err != nil {
+			return true, errors.Wrapf(err, "invalid maxUsage %q for path %q", r.MaxUsage, r.Path)
+		}
+		if used > maxUsage {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 type TorrentRules struct {

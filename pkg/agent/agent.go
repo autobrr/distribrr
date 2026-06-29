@@ -22,8 +22,6 @@ type Service struct {
 
 	controlNode *controlNode
 	clients     map[string]*QbitClient
-	stats       *stats.Stats
-	taskCount   int
 
 	serverClient *serverclient.Client
 }
@@ -35,10 +33,8 @@ type controlNode struct {
 
 func NewService(cfg *Config) *Service {
 	s := &Service{
-		cfg:       cfg,
-		clients:   map[string]*QbitClient{},
-		stats:     &stats.Stats{},
-		taskCount: 0,
+		cfg:     cfg,
+		clients: map[string]*QbitClient{},
 	}
 
 	s.initClients()
@@ -344,19 +340,20 @@ func (s *Service) CollectStats() {
 }
 
 func (s *Service) GetStatsFull(ctx context.Context) *stats.Stats {
-	s.stats = stats.GetStats()
-	s.GetClientStats(ctx)
-	return s.stats
+	st := stats.GetStats()
+	s.collectClientStats(ctx, st)
+	return st
 }
 
 func (s *Service) GetStats() *stats.Stats {
 	log.Trace().Msg("collecting stats")
-	s.stats = stats.GetStats()
-
-	return s.stats
+	return stats.GetStats()
 }
 
-func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
+// collectClientStats fills st with per-client torrent and storage status. It
+// operates only on the passed-in *stats.Stats (never on shared Service state),
+// so concurrent /stats requests cannot race on the same maps.
+func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 	log.Trace().Msg("collecting client stats")
 
 	// TODO use errgroup
@@ -365,40 +362,78 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 
 		l.Trace().Msg("check disk per path for client")
 
+		// storageOK stays true while every configured storage path still
+		// satisfies its minFree / maxUsage rule.
+		storageOK := true
+
 		for _, storage := range client.Rules.Storage {
 			l.Trace().Msgf("check disk for path %q", storage.Path)
 
-			s.stats.DiskPathStats[storage.Path] = stats.GetDiskInfoByPath(storage.Path)
+			disk := stats.GetDiskInfoByPath(storage.Path)
+			st.DiskPathStats[storage.Path] = disk
+
+			allowed, err := storage.allows(disk.Free, disk.Used)
+			if err != nil {
+				// bad threshold config: log and treat the rule as non-binding
+				l.Warn().Err(err).Msgf("ignoring storage rule for path %q", storage.Path)
+				continue
+			}
+
+			if !allowed {
+				storageOK = false
+				l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, disk.Used)
+			}
 		}
 
 		l.Trace().Msg("get active torrents for client")
 
-		status := stats.ClientStatusNotReady
-
 		activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
 		if err != nil {
 			l.Error().Err(err).Msgf("could not load active torrents for client")
+
+			// can't reach the client: report it as not ready so the scheduler
+			// skips it and the reason is visible, instead of silently dropping it.
+			reasons := []stats.NotReadyReason{stats.ReasonClientUnreachable}
+			if !storageOK {
+				reasons = append(reasons, stats.ReasonDiskFull)
+			}
+
+			st.ClientStats[name] = stats.ClientStats{
+				Name:                      name,
+				MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
+				Status:                    stats.ClientStatusNotReady,
+				Reasons:                   reasons,
+			}
+
 			continue
 		}
 
-		if len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads {
-			status = stats.ClientStatusReady
-		} else if len(activeDownloads) > client.Rules.Torrents.MaxActiveDownloads {
-			status = stats.ClientStatusNotReady
-		} else if len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
-			status = stats.ClientStatusNotReady
-
+		// a client is at capacity once it reaches its max active downloads, but
+		// we still allow it through if one of those downloads is nearly finished.
+		downloadsOK := len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads
+		if !downloadsOK && len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
 			l.Debug().Msgf("max active downloads (%d) reached, checking individual torrents...", client.Rules.Torrents.MaxActiveDownloads)
 
 			for _, torrent := range activeDownloads {
-				// if progress is above 75% and ETA is less than 60 seconds then set status to Ready
+				// if progress is above 75% and ETA is less than 60 seconds, treat it as a free slot
 				if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
-					status = stats.ClientStatusReady
+					downloadsOK = true
 					break
 				}
 			}
+		}
 
-			//l.Debug().Msgf("active downloads: %d, max active downloads: %d, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, status)
+		var reasons []stats.NotReadyReason
+		if !downloadsOK {
+			reasons = append(reasons, stats.ReasonMaxDownloadsReached)
+		}
+		if !storageOK {
+			reasons = append(reasons, stats.ReasonDiskFull)
+		}
+
+		status := stats.ClientStatusReady
+		if len(reasons) > 0 {
+			status = stats.ClientStatusNotReady
 		}
 
 		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
@@ -408,19 +443,15 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
 			ActiveDownloadsCount:      len(activeDownloads),
 			ActiveDownloads:           activeDownloads,
-			Ready:                     len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads,
 			Status:                    status,
+			Reasons:                   reasons,
 		}
 
 		l.Trace().Msgf("[%d/%d] active downloads, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Status)
 		l.Debug().Msgf("client status: %s", ct.Status)
 
-		s.stats.ClientStats[name] = ct
+		st.ClientStats[name] = ct
 	}
-
-	s.taskCount = s.stats.TaskCount
-
-	return s.stats
 }
 
 func (s *Service) GetLabels() map[string]string {

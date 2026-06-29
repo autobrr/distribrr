@@ -51,13 +51,23 @@ const (
 	ClientStatusNotReady ClientStatus = "NOT_READY"
 )
 
+// NotReadyReason explains why a client is not ready to accept new downloads.
+// A client may report multiple reasons at once.
+type NotReadyReason string
+
+const (
+	ReasonMaxDownloadsReached NotReadyReason = "max_downloads_reached"
+	ReasonDiskFull            NotReadyReason = "disk_full"
+	ReasonClientUnreachable   NotReadyReason = "client_unreachable"
+)
+
 type ClientStats struct {
 	Name                      string                `json:"name"`
 	ActiveDownloadsCount      int                   `json:"active_downloads_count"`
 	ActiveDownloads           []qbittorrent.Torrent `json:"active_downloads"`
 	MaxActiveDownloadsAllowed int                   `json:"max_active_downloads_allowed"`
-	Ready                     bool                  `json:"ready"` // Ready is true if ActiveDownloadsCount is less than configured
 	Status                    ClientStatus          `json:"status"`
+	Reasons                   []NotReadyReason      `json:"reasons,omitempty"` // why the client is NOT_READY (may be several)
 }
 
 func (c *ClientStats) HasAvailableSlot() bool {
@@ -118,7 +128,6 @@ func (s *Stats) CpuUsage() float64 {
 func (s *Stats) SetClientActiveDownloads(client string, count int) uint64 {
 	s.ClientStats[client] = ClientStats{
 		ActiveDownloadsCount: count,
-		Ready:                false,
 	}
 	return uint64(count)
 }
