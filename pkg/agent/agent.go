@@ -22,8 +22,6 @@ type Service struct {
 
 	controlNode *controlNode
 	clients     map[string]*QbitClient
-	stats       *stats.Stats
-	taskCount   int
 
 	serverClient *serverclient.Client
 }
@@ -35,10 +33,8 @@ type controlNode struct {
 
 func NewService(cfg *Config) *Service {
 	s := &Service{
-		cfg:       cfg,
-		clients:   map[string]*QbitClient{},
-		stats:     &stats.Stats{},
-		taskCount: 0,
+		cfg:     cfg,
+		clients: map[string]*QbitClient{},
 	}
 
 	s.initClients()
@@ -344,19 +340,20 @@ func (s *Service) CollectStats() {
 }
 
 func (s *Service) GetStatsFull(ctx context.Context) *stats.Stats {
-	s.stats = stats.GetStats()
-	s.GetClientStats(ctx)
-	return s.stats
+	st := stats.GetStats()
+	s.collectClientStats(ctx, st)
+	return st
 }
 
 func (s *Service) GetStats() *stats.Stats {
 	log.Trace().Msg("collecting stats")
-	s.stats = stats.GetStats()
-
-	return s.stats
+	return stats.GetStats()
 }
 
-func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
+// collectClientStats fills st with per-client torrent and storage status. It
+// operates only on the passed-in *stats.Stats (never on shared Service state),
+// so concurrent /stats requests cannot race on the same maps.
+func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 	log.Trace().Msg("collecting client stats")
 
 	// TODO use errgroup
@@ -373,7 +370,7 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 			l.Trace().Msgf("check disk for path %q", storage.Path)
 
 			disk := stats.GetDiskInfoByPath(storage.Path)
-			s.stats.DiskPathStats[storage.Path] = disk
+			st.DiskPathStats[storage.Path] = disk
 
 			allowed, err := storage.allows(disk.Free, disk.Used)
 			if err != nil {
@@ -401,7 +398,7 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 				reasons = append(reasons, stats.ReasonDiskFull)
 			}
 
-			s.stats.ClientStats[name] = stats.ClientStats{
+			st.ClientStats[name] = stats.ClientStats{
 				Name:                      name,
 				MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
 				Status:                    stats.ClientStatusNotReady,
@@ -453,12 +450,8 @@ func (s *Service) GetClientStats(ctx context.Context) *stats.Stats {
 		l.Trace().Msgf("[%d/%d] active downloads, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Status)
 		l.Debug().Msgf("client status: %s", ct.Status)
 
-		s.stats.ClientStats[name] = ct
+		st.ClientStats[name] = ct
 	}
-
-	s.taskCount = s.stats.TaskCount
-
-	return s.stats
 }
 
 func (s *Service) GetLabels() map[string]string {
