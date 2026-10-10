@@ -519,6 +519,9 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 	ctx, cancel := context.WithTimeout(ctx, s.TaskTimeout)
 	defer cancel()
 
+	// the request logger carries the server's correlation id
+	l := log.Ctx(ctx)
+
 	opts := map[string]string{}
 
 	if t.Category != "" {
@@ -553,21 +556,21 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 
 	for _, client := range clients {
 		sender.Go(func() error {
-			log.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
+			l.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
 
 			// add the file we already fetched: a URL add only queues the
 			// fetch in qbit, so a failed second fetch would go unnoticed.
 			// go-qbittorrent writes to the options map, so every client gets
 			// its own copy
 			if _, err := client.Client.AddTorrentFromMemoryCtx(ctx, rel.File, maps.Clone(opts)); err != nil {
-				log.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
+				l.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
 				return err
 			}
 
 			// handle reannounce
 			if rel.Hash != "" {
 				go func(clientName string, hash string, name string) {
-					log.Debug().Msgf("trying to re-announce torrent: %s %s", hash, name)
+					l.Debug().Msgf("trying to re-announce torrent: %s %s", hash, name)
 
 					// reannounce
 					options := qbittorrent.ReannounceOptions{
@@ -577,24 +580,24 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 					}
 
 					if err := client.Client.ReannounceTorrentWithRetry(s.baseContext(), hash, &options); err != nil {
-						log.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", hash, clientName)
+						l.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", hash, clientName)
 						return
 					}
 
-					log.Debug().Msgf("successfully re-announced torrent: %s %s", hash, name)
+					l.Debug().Msgf("successfully re-announced torrent: %s %s", hash, name)
 				}(client.Name, rel.Hash, rel.Name)
 			}
 
 			//downloads++
 
-			log.Debug().Msgf("successfully added torrent: %s", t.Name)
+			l.Debug().Msgf("successfully added torrent: %s", t.Name)
 
 			return nil
 		})
 	}
 
 	if err := sender.Wait(); err != nil {
-		log.Error().Err(err).Msg("error adding torrent to client")
+		l.Error().Err(err).Msg("error adding torrent to client")
 		return err
 	}
 
@@ -627,7 +630,7 @@ func (s *Service) readyClients(ctx context.Context, size uint64) ([]*QbitClient,
 		}
 
 		if !ct.HasRoomFor(size) {
-			log.Debug().Msgf("client %s has no room for %s (headroom %s)", client.Name, humanize.Bytes(size), humanize.Bytes(*ct.StorageHeadroom))
+			log.Ctx(ctx).Debug().Msgf("client %s has no room for %s (headroom %s)", client.Name, humanize.Bytes(size), humanize.Bytes(*ct.StorageHeadroom))
 			noRoom = append(noRoom, fmt.Sprintf("%s: %s room", client.Name, humanize.Bytes(*ct.StorageHeadroom)))
 			continue
 		}

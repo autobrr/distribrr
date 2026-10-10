@@ -6,10 +6,9 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/autobrr/distribrr/pkg/logger"
-
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/xid"
+	"github.com/rs/zerolog/log"
 )
 
 func IsAuthenticated(apiKey string) func(next http.Handler) http.Handler {
@@ -57,45 +56,19 @@ func IsAuthenticated(apiKey string) func(next http.Handler) http.Handler {
 	}
 }
 
-//// Key to use when setting the request ID.
-//type ctxKeyRequestID int
-//
-//// Key to use when setting the trace id.
-//type ctxTraceIdKey struct{}
-//
-//// RequestIDKey is the key that holds the unique request ID in a request context.
-//const RequestIDKey ctxKeyRequestID = 0
-//
-//// RequestIDHeader is the name of the HTTP Header which contains the request id.
-//// Exported so that it can be changed by developers
-//var RequestIDHeader = "X-Request-Id"
-//
-//var RequestIDPrefix = ""
-//
-//// TraceID is a middleware that injects a trace ID into the context of each
-//// request. A trace ID is a UUID string.
-//func TraceID(next http.Handler) http.Handler {
-//	fn := func(w http.ResponseWriter, r *http.Request) {
-//		ctx := r.Context()
-//		traceID := r.Header.Get(RequestIDHeader)
-//		if traceID == "" {
-//			traceID = uuid.New().String()
-//		}
-//		// set response header
-//		w.Header().Set(RequestIDHeader, traceID)
-//		// set request context
-//		ctx = context.WithValue(ctx, ctxTraceIdKey{}, traceID)
-//		next.ServeHTTP(w, r.WithContext(ctx))
-//	}
-//	return http.HandlerFunc(fn)
-//}
-
 // CorrelationIDHeader is the name of the HTTP Header which contains a correlation ID.
 // Exported so that it can be changed by developers
 var CorrelationIDHeader = "X-Correlation-ID"
 
-// CorrelationIDCtxKey is the context key used.
-var CorrelationIDCtxKey = "correlation_id"
+type correlationIDKey struct{}
+
+// CorrelationIDFromContext returns the request's correlation ID, or "" if ctx
+// has none.
+func CorrelationIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(correlationIDKey{}).(string)
+
+	return id
+}
 
 // CorrelationID is a middleware that injects a correlation ID into the context of each request.
 // A correlation ID is an alphanumeric string.
@@ -110,9 +83,7 @@ func CorrelationID(next http.Handler) http.Handler {
 		w.Header().Set(CorrelationIDHeader, id)
 
 		// set request context
-		//ctx = context.WithValue(ctx, ctxTraceIdKey{}, id)
-		//ctx = context.WithValue(ctx, "correlation_id", id)
-		ctx = context.WithValue(ctx, CorrelationIDCtxKey, id)
+		ctx = context.WithValue(ctx, correlationIDKey{}, id)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 	return http.HandlerFunc(fn)
@@ -136,25 +107,13 @@ func RequestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		l := logger.Get()
-
-		//correlationID := xid.New().String()
-		//
-		//ctx := context.WithValue(r.Context(), "correlation_id", correlationID)
-
-		//r = r.WithContext(ctx)
-
-		//w.Header().Add("X-Correlation-ID", correlationID)
-		//
-		//l.UpdateContext(func(c zerolog.Context) zerolog.Context {
-		//	return c.Str("correlation_id", correlationID)
-		//})
+		l := log.Logger
 
 		// With copies the context; UpdateContext would append to the backing
-		// array the shared logger.Get() value hands every request, racing
-		// with concurrent requests
-		if id := r.Context().Value(CorrelationIDCtxKey).(string); id != "" {
-			l = l.With().Str(CorrelationIDCtxKey, id).Logger()
+		// array the shared global logger hands every request, racing with
+		// concurrent requests
+		if id := CorrelationIDFromContext(r.Context()); id != "" {
+			l = l.With().Str("correlation_id", id).Logger()
 		}
 
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)

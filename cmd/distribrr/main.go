@@ -2,16 +2,14 @@ package main
 
 import (
 	"os"
-	"time"
 
 	"github.com/autobrr/distribrr/cmd"
+	"github.com/autobrr/distribrr/pkg/logger"
 	"github.com/autobrr/distribrr/pkg/version"
 
 	"github.com/blang/semver"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/rs/zerolog/pkgerrors"
 	"github.com/spf13/cobra"
 )
 
@@ -28,10 +26,7 @@ A companion tool for autobrr to distribute downloads.
 `
 
 func main() {
-	// setup logger
-	zerolog.TimeFieldFormat = time.RFC3339
-	zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	logger.Setup()
 
 	var rootCmd = &cobra.Command{
 		Use:   "distribrr",

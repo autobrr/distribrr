@@ -10,12 +10,12 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/autobrr/distribrr/pkg/middleware"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 	"github.com/autobrr/distribrr/pkg/version"
 
 	"github.com/pkg/errors"
-	"github.com/rs/xid"
 )
 
 const DefaultTimeout = 15 * time.Second
@@ -238,13 +238,8 @@ func (c *Client) setHeaders(ctx context.Context, req *http.Request) {
 	req.Header.Add("Authorization", c.token)
 	req.Header.Add("User-Agent", "distribrr-server-"+version.Version)
 
-	if ctx != nil {
-		if id := ctx.Value("correlation_id"); id != nil {
-			if id == "" {
-				id = xid.New().String()
-			}
-			req.Header.Add("X-Correlation-ID", id.(string))
-		}
+	if id := middleware.CorrelationIDFromContext(ctx); id != "" {
+		req.Header.Add(middleware.CorrelationIDHeader, id)
 	}
 }
 
