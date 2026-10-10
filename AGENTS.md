@@ -109,7 +109,8 @@ The task's `scheduler_type` picks the scheduler in `server.schedulerFor`: `least
    and, when `size` is set, where at least one ready client has room (`hasRoomFor`). A node with no ready client is
    rejected with every client's reasons. Every rejected node gets a `NodeRejection` with reasons.
 2. `Score`: `LeastActive` gives base 100, +20 per client with zero active downloads, minus per-torrent penalties
-   weighted by remaining progress and ETA. `RoundRobin` scores every node 0.
+   weighted by remaining progress and ETA. Only `usableClients` count (ready, with room for `size`): the agent skips
+   the others, and an unreachable client reports zero downloads. `RoundRobin` scores every node 0.
 3. `PickN`: take `task.MaxAllowedReplicas` nodes (default 1, capped at the candidate count). `LeastActive` sorts by
    score descending. `RoundRobin` walks nodes in name order starting after the last node it picked; the server keeps
    one shared `RoundRobin`, so the turn carries across tasks (in memory, reset on restart).

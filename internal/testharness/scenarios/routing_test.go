@@ -2,9 +2,12 @@ package scenarios
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 
+	"github.com/autobrr/distribrr/internal/testharness"
 	"github.com/autobrr/distribrr/internal/testharness/fakeqbit"
+	"github.com/autobrr/distribrr/pkg/stats"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,6 +123,39 @@ func TestScoring_prefersIdleAgent(t *testing.T) {
 
 	assert.Empty(t, busyQbit.Added())
 	assert.Len(t, idleQbit.Added(), 5)
+}
+
+// Down clients report no active downloads, but the agent will not add to
+// them, so they must not make a busy agent look idle.
+func TestScoring_ignoresUnreachableClients(t *testing.T) {
+	e := newEnv(t)
+
+	busyQbit, down1, down2 := fakeqbit.New(t), fakeqbit.New(t), fakeqbit.New(t)
+	flaky := e.AddAgent(t, testharness.AgentSpec{
+		Name: "flaky",
+		Clients: []testharness.ClientSpec{
+			{Name: "busy", Qbit: busyQbit},
+			{Name: "down1", Qbit: down1},
+			{Name: "down2", Qbit: down2},
+		},
+	})
+	idle, idleQbit := e.agent(t, "idle", nil)
+	e.WaitReady(t, flaky, idle)
+
+	busyQbit.SetActiveDownloads(downloading("a", 0.1, 3600))
+	down1.SetDown(true)
+	down2.SetDown(true)
+	flaky.WaitClients(t, func(cs stats.ClientStats) bool {
+		return cs.Name == "busy" || slices.Contains(cs.Reasons, stats.ReasonClientUnreachable)
+	})
+
+	for range 3 {
+		status, body := e.Webhook(t, e.release("Unreachable.Release-GRP", 10*mb))
+		require.Equal(t, http.StatusCreated, status, body)
+	}
+
+	assert.Empty(t, busyQbit.Added())
+	assert.Len(t, idleQbit.Added(), 3)
 }
 
 func TestTask_categoryAndTagsReachQbit(t *testing.T) {
