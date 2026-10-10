@@ -33,6 +33,7 @@ const (
 	defaultHealthCheckInterval = 10 * time.Second
 	defaultTaskTimeout         = 75 * time.Second
 	defaultWebhookTimeout      = 100 * time.Second
+	defaultNodeCheckTimeout    = 5 * time.Second
 )
 
 type Service struct {
@@ -47,6 +48,10 @@ type Service struct {
 	// WebhookTimeout bounds a whole SendWork, node selection included. Keep it
 	// below autobrr's webhook timeout (120s).
 	WebhookTimeout time.Duration
+	// NodeCheckTimeout bounds fetching labels and stats from the nodes for one
+	// task, and one health check round. Nodes are checked concurrently, so a
+	// node that stopped answering costs this once, not once per node.
+	NodeCheckTimeout time.Duration
 
 	cfg         *Config
 	workerNodes []*node.Node
@@ -63,6 +68,7 @@ func NewService(cfg *Config) *Service {
 		HealthCheckInterval: defaultHealthCheckInterval,
 		TaskTimeout:         defaultTaskTimeout,
 		WebhookTimeout:      defaultWebhookTimeout,
+		NodeCheckTimeout:    defaultNodeCheckTimeout,
 
 		cfg:         cfg,
 		workerNodes: make([]*node.Node, 0),
@@ -299,7 +305,7 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 
 	if err := newNode.VerifyToken(ctx); err != nil {
 		s.log.Error().Err(err).Msgf("could not verify agent token")
-		return err
+		return errors.Wrapf(err, "could not reach agent at %s to verify its token", req.ClientAddr)
 	}
 
 	s.m.Lock()
@@ -418,6 +424,10 @@ func (s *Service) HealthChecks(ctx context.Context) {
 }
 
 func (s *Service) healthChecks(ctx context.Context) error {
+	// a node that stopped answering must not hold up the next round
+	ctx, cancel := context.WithTimeout(ctx, s.NodeCheckTimeout)
+	defer cancel()
+
 	fetcher := errgroup.Group{}
 
 	workerNodes := s.GetNodes()
@@ -550,7 +560,9 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 	}
 
 	// select candidates
-	candidates, rejected := sc.SelectCandidateNodes(ctx, t, s.GetNodes())
+	checkCtx, cancel := context.WithTimeout(ctx, s.NodeCheckTimeout)
+	candidates, rejected := sc.SelectCandidateNodes(checkCtx, t, s.GetNodes())
+	cancel()
 	if len(candidates) == 0 {
 		return nil, rejected, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -66,7 +67,7 @@ func (c *Client) JoinRequest(ctx context.Context, joinReq JoinRequest) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("bad status: %d", resp.StatusCode)
+		return statusError(resp)
 	}
 
 	return nil
@@ -103,10 +104,34 @@ func (c *Client) DeregisterRequest(ctx context.Context, data DeregisterRequest) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return statusError(resp)
 	}
 
 	return nil
+}
+
+// statusError reads the error the server sent with an unexpected status.
+func statusError(resp *http.Response) error {
+	if msg := errorBody(resp); msg != "" {
+		return fmt.Errorf("unexpected status: %d: %s", resp.StatusCode, msg)
+	}
+
+	return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+}
+
+// errorBody returns the message of an error response: the "error" field of a
+// JSON body, or else the body itself, capped at 4 KiB.
+func errorBody(resp *http.Response) string {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+	var e struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err == nil && e.Error != "" {
+		return e.Error
+	}
+
+	return string(bytes.TrimSpace(body))
 }
 
 func (c *Client) setHeaders(ctx context.Context, req *http.Request) {

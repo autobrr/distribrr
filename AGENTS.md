@@ -65,6 +65,8 @@ restart on both; a bad file is logged and the old config kept.
 - Deregister flips the node to `REMOVED` on purpose; it stays in memory and in the config file. Unknown names give 404.
 - `HealthChecks` pings every non-removed agent at startup and then every 10s, and sets `READY` / `UNKNOWN`. A node
   is `READY` as soon as it registers (the token callback reached it).
+- `NodeCheckTimeout` (5s) bounds one health check round and, per task, fetching labels and stats from the candidates.
+  Both check nodes concurrently, so an agent that stopped answering costs one timeout, not one per node.
 - An agent registers once: it does not re-join if the server later loses its node, until the agent restarts.
 
 ### Agent (worker): `pkg/agent`, default port 7430
@@ -127,8 +129,8 @@ The task's `scheduler_type` picks the scheduler in `server.schedulerFor`: `least
 `internal/testharness` runs a real server and N agents in-process over HTTP (`Service.Serve(ctx, ln, reload)`, with
 timings shortened through exported Service fields). Agents talk to `fakeqbit` (an in-memory qBittorrent WebUI covering
 the endpoints go-qbittorrent calls) and fetch `.torrent` files from `faketracker`. `harness.go` gives `New`,
-`AddAgent(AgentSpec{...})`, `Webhook`, `WaitReady`/`WaitNode`, agent `Stop`/`Kill`/`Restart`/`Reload`, and
-`ReloadServer`. Add a scenario to `internal/testharness/scenarios` for any change to scheduling, readiness, storage or
+`AddAgent(AgentSpec{...})`, `Webhook`, `WaitReady`/`WaitNode`, agent `Stop`/`Kill`/`Hang`/`Restart`/`Reload`, and
+`ReloadServer`/`RestartServer`. `Hang` keeps the agent accepting connections but answering nothing, unlike `Kill`. Add a scenario to `internal/testharness/scenarios` for any change to scheduling, readiness, storage or
 node lifecycle.
 
 ## Conventions and current state

@@ -8,6 +8,7 @@ import (
 	"github.com/autobrr/distribrr/internal/testharness"
 	"github.com/autobrr/distribrr/internal/testharness/fakeqbit"
 	"github.com/autobrr/distribrr/pkg/server"
+	serverclient "github.com/autobrr/distribrr/pkg/server/client"
 	"github.com/autobrr/distribrr/pkg/stats"
 
 	"github.com/stretchr/testify/assert"
@@ -233,5 +234,67 @@ func TestReadyWithoutWaitingForHealthCheck(t *testing.T) {
 		status, body := e.Webhook(t, e.release("Restarted.Release-GRP", 10*mb))
 		require.Equal(t, http.StatusCreated, status, body)
 		assert.Len(t, q.Added(), 1)
+	})
+}
+
+func TestHungAgent(t *testing.T) {
+	t.Parallel()
+
+	const checkTimeout = 300 * time.Millisecond
+
+	t.Run("hung agent does not stall the webhook", func(t *testing.T) {
+		// no health check after the first, so the hung agent stays READY like
+		// one that went dark since the last check
+		e := newEnv(t, testharness.WithHealthCheckInterval(time.Hour), testharness.WithNodeCheckTimeout(checkTimeout))
+
+		hung, hungQbit := e.agent(t, "hung", nil)
+		ok, okQbit := e.agent(t, "ok", nil)
+		e.WaitReady(t, hung, ok)
+
+		hung.Hang()
+
+		tk := e.release("Hung.Release-GRP", 10*mb)
+		tk.MaxAllowedReplicas = 2
+
+		start := time.Now()
+		status, body := e.Webhook(t, tk)
+		require.Equal(t, http.StatusCreated, status, body)
+
+		assert.Less(t, time.Since(start), 5*checkTimeout, "the hung agent delayed the webhook")
+		assert.Empty(t, hungQbit.Added())
+		assert.Len(t, okQbit.Added(), 1)
+	})
+
+	t.Run("hung agent does not delay health checks of the others", func(t *testing.T) {
+		e := newEnv(t, testharness.WithNodeCheckTimeout(checkTimeout))
+
+		hung, _ := e.agent(t, "hung", nil)
+		crashed, _ := e.agent(t, "crashed", nil)
+		e.WaitReady(t, hung, crashed)
+
+		// let a health check round start waiting on the hung agent
+		hung.Hang()
+		time.Sleep(100 * time.Millisecond)
+
+		crashed.Kill()
+
+		e.WaitNode(t, "crashed", "UNKNOWN", 3*checkTimeout)
+		e.WaitNode(t, "hung", "UNKNOWN", 3*checkTimeout)
+	})
+}
+
+func TestJoinError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unreachable client_addr is reported to the agent", func(t *testing.T) {
+		e := newEnv(t)
+
+		err := serverclient.NewClient(e.URL(), testharness.Token).JoinRequest(t.Context(), serverclient.JoinRequest{
+			NodeName:   "unreachable",
+			ClientAddr: "http://127.0.0.1:1",
+			Token:      "unreachable-token",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "could not reach agent at http://127.0.0.1:1 to verify its token")
 	})
 }
