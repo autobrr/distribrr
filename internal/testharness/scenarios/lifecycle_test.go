@@ -3,10 +3,12 @@ package scenarios
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/autobrr/distribrr/internal/testharness"
 	"github.com/autobrr/distribrr/internal/testharness/fakeqbit"
 	"github.com/autobrr/distribrr/pkg/server"
+	"github.com/autobrr/distribrr/pkg/stats"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -199,4 +201,37 @@ func TestAuth(t *testing.T) {
 
 	status, body := e.Webhook(t, tk)
 	require.Equal(t, http.StatusCreated, status, body)
+}
+
+// Health checks are an hour apart here, so a node only takes tasks if joining
+// or a server start makes it READY without waiting for the next one.
+func TestReadyWithoutWaitingForHealthCheck(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a joined agent takes tasks right away", func(t *testing.T) {
+		e := newEnv(t, testharness.WithHealthCheckInterval(time.Hour))
+
+		a, q := e.agent(t, "node1", nil)
+		a.WaitClients(t, func(cs stats.ClientStats) bool { return cs.Status == stats.ClientStatusReady })
+		e.WaitNodeMatch(t, "node1", func(testharness.NodeInfo) bool { return true })
+
+		status, body := e.Webhook(t, e.release("Joined.Release-GRP", 10*mb))
+		require.Equal(t, http.StatusCreated, status, body)
+		assert.Len(t, q.Added(), 1)
+	})
+
+	t.Run("a restarted server takes tasks right away", func(t *testing.T) {
+		e := newEnv(t, testharness.WithHealthCheckInterval(time.Hour))
+
+		a, q := e.agent(t, "node1", nil)
+		a.WaitClients(t, func(cs stats.ClientStats) bool { return cs.Status == stats.ClientStatusReady })
+		e.WaitNodeMatch(t, "node1", func(testharness.NodeInfo) bool { return true })
+
+		e.RestartServer(t)
+		e.WaitNode(t, "node1", "READY", testharness.WaitTimeout)
+
+		status, body := e.Webhook(t, e.release("Restarted.Release-GRP", 10*mb))
+		require.Equal(t, http.StatusCreated, status, body)
+		assert.Len(t, q.Added(), 1)
+	})
 }
