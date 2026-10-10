@@ -2,14 +2,17 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/autobrr/distribrr/pkg/node"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/autobrr/go-qbittorrent"
+	"github.com/dustin/go-humanize"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,9 +23,16 @@ const (
 )
 
 type Scheduler interface {
-	SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) []*node.Node
+	SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection)
 	Score(ctx context.Context, t task.Task, nodes []*node.Node) map[string]float64
 	Pick(scores map[string]float64, candidates []*node.Node) []*node.Node
+}
+
+// NodeRejection records why a node was not selected as a candidate, so callers
+// can explain to the user why a task could not be scheduled anywhere.
+type NodeRejection struct {
+	Node    string
+	Reasons []string
 }
 
 type LeastActive struct {
@@ -30,12 +40,13 @@ type LeastActive struct {
 	LastWorker int
 }
 
-func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) []*node.Node {
+func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection) {
 	var candidates []*node.Node
+	var rejected []NodeRejection
 
-nodeLoop:
 	for _, n := range nodes {
 		if n.Status != node.StatusReady {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("node not ready (%s)", n.Status)}})
 			continue
 		}
 
@@ -43,31 +54,75 @@ nodeLoop:
 		nodeLabels, err := n.GetLabels(ctx)
 		if err != nil {
 			log.Error().Err(err).Msgf("could not get labels for node %s", n.Name)
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{"could not fetch labels"}})
 			continue
 		}
 
 		if !checkLabels(t.Labels, nodeLabels) {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{"labels do not match task"}})
 			continue
 		}
-
-		// TODO check available disk
 
 		stat, err := n.GetStats(ctx)
 		if err != nil {
 			log.Error().Err(err).Msgf("could not get stats for node %s", n.Name)
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{"could not fetch stats"}})
 			continue
 		}
 
+		var clientReasons []string
 		for _, clientStats := range stat.ClientStats {
 			if clientStats.Status != stats.ClientStatusReady {
-				continue nodeLoop
+				clientReasons = append(clientReasons, fmt.Sprintf("client %s: %s", clientStats.Name, formatReasons(clientStats.Reasons)))
 			}
+		}
+
+		if len(clientReasons) > 0 {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: clientReasons})
+			continue
+		}
+
+		// the agent adds the torrent to every client with room, so the node
+		// only needs one client that fits
+		if !hasRoomFor(stat.ClientStats, t.Size) {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("no client has room for %s", humanize.Bytes(t.Size))}})
+			continue
 		}
 
 		candidates = append(candidates, n)
 	}
 
-	return candidates
+	return candidates, rejected
+}
+
+// hasRoomFor reports whether at least one client has storage room for a torrent
+// of size bytes. An unknown size (0) always fits.
+func hasRoomFor(clients map[string]stats.ClientStats, size uint64) bool {
+	if size == 0 {
+		return true
+	}
+
+	for _, c := range clients {
+		if c.HasRoomFor(size) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// formatReasons renders client not-ready reasons for human-readable output.
+func formatReasons(reasons []stats.NotReadyReason) string {
+	if len(reasons) == 0 {
+		return "not ready"
+	}
+
+	parts := make([]string, len(reasons))
+	for i, reason := range reasons {
+		parts[i] = string(reason)
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 // checkLabels match nodes by labels

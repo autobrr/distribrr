@@ -43,11 +43,14 @@ To use with autobrr set up a new action of type `Webhook` and use the following:
       "category": "race",
       "tags": "race,distribrr",
       "indexer": "{{ .IndexerName }}",
+      "size": {{ .Size }},
       "labels": {
         "region": "test"
       }
     }
     ```
+
+    `size` is optional. When it is set, the server skips nodes where no client has storage room for the torrent, so another node can take it. It is `0` when autobrr does not know the size yet; the agent then checks against the size from the `.torrent` file.
 
 ## Flow
 

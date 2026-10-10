@@ -2,6 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/autobrr/distribrr/pkg/node"
@@ -9,6 +12,7 @@ import (
 	"github.com/autobrr/distribrr/pkg/task"
 	"github.com/autobrr/go-qbittorrent"
 
+	"github.com/c9s/goprocinfo/linux"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -125,7 +129,6 @@ func TestLeastActive_Score(t *testing.T) {
 								"node1": {
 									ActiveDownloadsCount:      0,
 									MaxActiveDownloadsAllowed: 1,
-									Ready:                     true,
 									Status:                    stats.ClientStatusReady,
 									ActiveDownloads:           []qbittorrent.Torrent{},
 								},
@@ -141,7 +144,6 @@ func TestLeastActive_Score(t *testing.T) {
 								"node1": {
 									ActiveDownloadsCount:      1,
 									MaxActiveDownloadsAllowed: 2,
-									Ready:                     true,
 									Status:                    stats.ClientStatusReady,
 									ActiveDownloads: []qbittorrent.Torrent{
 										{
@@ -162,7 +164,6 @@ func TestLeastActive_Score(t *testing.T) {
 								"node1": {
 									ActiveDownloadsCount:      0,
 									MaxActiveDownloadsAllowed: 3,
-									Ready:                     true,
 									Status:                    stats.ClientStatusReady,
 									ActiveDownloads:           []qbittorrent.Torrent{},
 								},
@@ -178,7 +179,6 @@ func TestLeastActive_Score(t *testing.T) {
 								"node1": {
 									ActiveDownloadsCount:      2,
 									MaxActiveDownloadsAllowed: 3,
-									Ready:                     true,
 									Status:                    stats.ClientStatusReady,
 									ActiveDownloads: []qbittorrent.Torrent{
 										{
@@ -247,4 +247,86 @@ func TestLeastActive_PickN(t *testing.T) {
 		assert.Len(t, got, 1)
 		assert.Equal(t, "node1", got[0].Name)
 	})
+}
+
+func Test_formatReasons(t *testing.T) {
+	assert.Equal(t, "not ready", formatReasons(nil))
+	assert.Equal(t, "disk_full", formatReasons([]stats.NotReadyReason{stats.ReasonDiskFull}))
+	assert.Equal(t, "max_downloads_reached, disk_full",
+		formatReasons([]stats.NotReadyReason{stats.ReasonMaxDownloadsReached, stats.ReasonDiskFull}))
+}
+
+func TestLeastActive_SelectCandidateNodes_rejections(t *testing.T) {
+	r := &LeastActive{}
+
+	// both nodes are rejected without any network calls: "down" fails the
+	// status gate, "mismatch" fails label matching using its cached labels.
+	nodes := []*node.Node{
+		{Name: "down", Status: node.StatusUnknown, Labels: map[string]string{}},
+		{Name: "mismatch", Status: node.StatusReady, Labels: map[string]string{"region": "eu"}},
+	}
+
+	tsk := task.Task{Labels: map[string]string{"region": "us"}}
+
+	candidates, rejected := r.SelectCandidateNodes(context.Background(), tsk, nodes)
+
+	assert.Empty(t, candidates)
+	assert.Len(t, rejected, 2)
+
+	byNode := map[string][]string{}
+	for _, rj := range rejected {
+		byNode[rj.Node] = rj.Reasons
+	}
+
+	assert.Contains(t, byNode, "down")
+	assert.Contains(t, byNode["down"][0], "node not ready")
+	assert.Contains(t, byNode, "mismatch")
+	assert.Contains(t, byNode["mismatch"][0], "labels do not match")
+}
+
+func Test_hasRoomFor(t *testing.T) {
+	const gb = 1_000_000_000
+
+	full := stats.ClientStats{Name: "full", StorageHeadroom: new(uint64(1 * gb))}
+	roomy := stats.ClientStats{Name: "roomy", StorageHeadroom: new(uint64(100 * gb))}
+	noRules := stats.ClientStats{Name: "norules"}
+
+	assert.True(t, hasRoomFor(map[string]stats.ClientStats{"full": full}, 0), "unknown size always fits")
+	assert.False(t, hasRoomFor(map[string]stats.ClientStats{"full": full}, 50*gb))
+	assert.True(t, hasRoomFor(map[string]stats.ClientStats{"full": full, "roomy": roomy}, 50*gb), "one client with room is enough")
+	assert.True(t, hasRoomFor(map[string]stats.ClientStats{"norules": noRules}, 50*gb), "no storage rules means nothing to check")
+	assert.False(t, hasRoomFor(map[string]stats.ClientStats{}, 50*gb))
+}
+
+func TestLeastActive_SelectCandidateNodes_size(t *testing.T) {
+	const gb = 1_000_000_000
+
+	// a fake agent whose only client is ready with 10GB of storage headroom
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(stats.Stats{
+			MemStats:  &linux.MemInfo{},
+			DiskStats: &linux.Disk{},
+			ClientStats: map[string]stats.ClientStats{
+				"qbit": {Name: "qbit", Status: stats.ClientStatusReady, StorageHeadroom: new(uint64(10 * gb))},
+			},
+		})
+	}))
+	defer agentSrv.Close()
+
+	newNode := func() *node.Node {
+		n := node.NewNode("node1", agentSrv.URL, "token", "worker")
+		n.Status = node.StatusReady
+		n.Labels = map[string]string{}
+		return n
+	}
+
+	r := &LeastActive{}
+
+	candidates, rejected := r.SelectCandidateNodes(t.Context(), task.Task{Size: 5 * gb}, []*node.Node{newNode()})
+	assert.Len(t, candidates, 1)
+	assert.Empty(t, rejected)
+
+	candidates, rejected = r.SelectCandidateNodes(t.Context(), task.Task{Size: 50 * gb}, []*node.Node{newNode()})
+	assert.Empty(t, candidates)
+	assert.Equal(t, []NodeRejection{{Node: "node1", Reasons: []string{"no client has room for 50 GB"}}}, rejected)
 }

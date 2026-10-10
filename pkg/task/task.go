@@ -13,6 +13,7 @@ type Task struct {
 	Category           string            `json:"category"`
 	Tags               string            `json:"tags"`
 	Indexer            string            `json:"indexer"`
+	Size               uint64            `json:"size"` // torrent size in bytes if known (autobrr {{ .Size }}), 0 if unknown
 	State              State             `json:"-"`
 	Cpu                float64           `json:"cpu"`
 	Memory             int64             `json:"memory"`
@@ -34,6 +35,7 @@ func NewTask() Task {
 		Name:               "",
 		Category:           "",
 		Tags:               "",
+		Size:               0,
 		State:              Pending,
 		Cpu:                0,
 		Memory:             0,

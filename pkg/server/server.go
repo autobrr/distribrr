@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -277,15 +278,16 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 	l.Trace().Msg("selecting workers")
 
 	// select workers
-	nodes, err := s.selectWorkers(ctx, te.Task)
+	nodes, rejected, err := s.selectWorkers(ctx, te.Task)
 	if err != nil {
 		l.Error().Err(err).Msg("error selecting nodes")
 		return errors.Wrap(err, "could not select nodes for task")
 	}
 
 	if len(nodes) == 0 {
-		l.Info().Msg("found no nodes to send work to")
-		return errors.New("no ready nodes available to handle the task")
+		summary := summarizeRejections(rejected)
+		l.Info().Msgf("found no nodes to send work to: %s", summary)
+		return errors.Errorf("no ready nodes available to handle the task: %s", summary)
 	}
 
 	l.Debug().Msgf("selected %d nodes", len(nodes))
@@ -335,20 +337,20 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 	return nil
 }
 
-func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node, error) {
+func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node, []scheduler.NodeRejection, error) {
 	// hardcoded scheduler for now
 	var sc scheduler.LeastActive
 
 	// select candidates
-	candidates := sc.SelectCandidateNodes(ctx, t, s.workerNodes)
+	candidates, rejected := sc.SelectCandidateNodes(ctx, t, s.workerNodes)
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, rejected, nil
 	}
 
 	// score
 	scores := sc.Score(ctx, t, candidates)
 	if len(scores) == 0 {
-		return nil, nil
+		return nil, rejected, nil
 	}
 
 	// pick
@@ -356,7 +358,22 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 
 	s.log.Trace().Msgf("task max replicas %d", t.MaxAllowedReplicas)
 
-	return nodes, nil
+	return nodes, rejected, nil
+}
+
+// summarizeRejections renders why no candidate nodes were available, for the
+// caller-facing error and logs (e.g. "node1 (client qbit: disk_full); node2 (node not ready (UNKNOWN))").
+func summarizeRejections(rejections []scheduler.NodeRejection) string {
+	if len(rejections) == 0 {
+		return "no worker nodes registered"
+	}
+
+	parts := make([]string, 0, len(rejections))
+	for _, r := range rejections {
+		parts = append(parts, fmt.Sprintf("%s (%s)", r.Node, strings.Join(r.Reasons, "; ")))
+	}
+
+	return strings.Join(parts, "; ")
 }
 
 //func (s *Service) SelectWorkers(t task.Task) ([]*node.Node, error) {
