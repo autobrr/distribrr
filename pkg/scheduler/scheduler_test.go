@@ -420,3 +420,56 @@ func TestRoundRobin_PickN(t *testing.T) {
 		assert.Nil(t, r.PickN(nil, nil, 1))
 	})
 }
+
+// Only the clients the agent would add to count towards the score: a client
+// that is not ready, or has no room for the torrent, is skipped by the agent.
+func TestLeastActive_Score_onlyUsableClients(t *testing.T) {
+	idle := stats.ClientStats{Name: "idle", Status: stats.ClientStatusReady}
+	busy := stats.ClientStats{
+		Name:                 "busy",
+		Status:               stats.ClientStatusReady,
+		ActiveDownloadsCount: 1,
+		ActiveDownloads:      []qbittorrent.Torrent{{Progress: 0.1, ETA: 3600}},
+	}
+	unreachable := stats.ClientStats{Name: "unreachable", Status: stats.ClientStatusNotReady, Reasons: []stats.NotReadyReason{stats.ReasonClientUnreachable}}
+	full := stats.ClientStats{
+		Name:                 "full",
+		Status:               stats.ClientStatusNotReady,
+		Reasons:              []stats.NotReadyReason{stats.ReasonMaxDownloadsReached},
+		ActiveDownloadsCount: 1,
+		ActiveDownloads:      []qbittorrent.Torrent{{Progress: 0.1, ETA: 3600}},
+	}
+	headroom := uint64(5 * 1000 * 1000)
+	noRoom := stats.ClientStats{Name: "noroom", Status: stats.ClientStatusReady, StorageHeadroom: &headroom}
+
+	nodeWith := func(name string, clients ...stats.ClientStats) *node.Node {
+		cs := make(map[string]stats.ClientStats, len(clients))
+		for _, c := range clients {
+			cs[c.Name] = c
+		}
+		return testNode(name, node.StatusReady, map[string]string{}, stats.Stats{ClientStats: cs})
+	}
+
+	r := &LeastActive{}
+	busyScore := r.Score(context.Background(), task.Task{}, []*node.Node{nodeWith("n", busy)})["n"]
+
+	tests := []struct {
+		name string
+		size uint64
+		node *node.Node
+		want float64
+	}{
+		{name: "unreachable client earns no idle bonus", node: nodeWith("n", idle, unreachable), want: 120},
+		{name: "not ready client's downloads are not penalized", node: nodeWith("n", idle, full), want: 120},
+		{name: "client without room earns no idle bonus", size: 10 * 1000 * 1000, node: nodeWith("n", idle, noRoom), want: 120},
+		{name: "client without room counts when size is unknown", node: nodeWith("n", idle, noRoom), want: 140},
+		{name: "unreachable clients do not lift a busy node", node: nodeWith("n", busy, unreachable), want: busyScore},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.Score(context.Background(), task.Task{Size: tt.size}, []*node.Node{tt.node})
+			assert.Equal(t, tt.want, got["n"])
+		})
+	}
+}

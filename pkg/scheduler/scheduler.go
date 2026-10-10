@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"sort"
@@ -126,6 +127,17 @@ func readyClients(clients map[string]stats.ClientStats) map[string]stats.ClientS
 	return ready
 }
 
+// usableClients returns the ready clients with room for a torrent of size
+// bytes, the ones the agent adds it to.
+func usableClients(clients map[string]stats.ClientStats, size uint64) map[string]stats.ClientStats {
+	usable := readyClients(clients)
+	maps.DeleteFunc(usable, func(_ string, c stats.ClientStats) bool {
+		return !c.HasRoomFor(size)
+	})
+
+	return usable
+}
+
 // hasRoomFor reports whether at least one client has storage room for a torrent
 // of size bytes. An unknown size (0) always fits.
 func hasRoomFor(clients map[string]stats.ClientStats, size uint64) bool {
@@ -176,7 +188,8 @@ func (r *LeastActive) Score(ctx context.Context, t task.Task, nodes []*node.Node
 	for _, n := range nodes {
 		score := baseScore
 
-		for _, clientStats := range n.Stats().ClientStats {
+		// score only the clients the agent would add the torrent to
+		for _, clientStats := range usableClients(n.Stats().ClientStats, t.Size) {
 			if clientStats.ActiveDownloadsCount == 0 {
 				// Bonus for having no active downloads
 				score += noActiveBonus
