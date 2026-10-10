@@ -10,8 +10,6 @@ import (
 	yml "gopkg.in/yaml.v3"
 )
 
-var k = koanf.New(".")
-
 type AgentNode struct {
 	Name  string
 	Addr  string
@@ -61,6 +59,10 @@ func (c *Config) LoadFromFile(configPath string) error {
 			//}
 		}
 
+		// a fresh koanf per load: koanf merges successive loads, so a shared
+		// instance would keep keys that were deleted from the file
+		k := koanf.New(".")
+
 		if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
 			return errors.Wrapf(err, "could not parse config file: %s", configPath)
 		}
@@ -70,6 +72,21 @@ func (c *Config) LoadFromFile(configPath string) error {
 			return errors.Wrapf(err, "could not unmarshal config file: %s", configPath)
 		}
 	}
+	return nil
+}
+
+// writeNodesToFile writes the config with nodes in place of c.Nodes and only
+// sets c.Nodes once the write succeeded, so a failed write leaves c unchanged.
+func (c *Config) writeNodesToFile(nodes []*AgentNode) error {
+	next := *c
+	next.Nodes = nodes
+
+	if err := next.WriteToFile(); err != nil {
+		return err
+	}
+
+	c.Nodes = nodes
+
 	return nil
 }
 

@@ -12,13 +12,15 @@ import (
 	"github.com/pkg/errors"
 )
 
-var k = koanf.New(".")
-
 type Config struct {
 	Http    Http                   `yaml:"http"`
 	Agent   Agent                  `yaml:"agent"`
 	Manager Manager                `yaml:"manager"`
 	Clients map[string]*QbitClient `yaml:"clients"`
+
+	// path is the file the config was loaded from, used to reload it on SIGHUP.
+	// Empty when no config file was given.
+	path string
 }
 
 type Agent struct {
@@ -61,21 +63,45 @@ func (c *Config) Defaults() {
 	//c.Clients = make(map[string]*QbitClient, 0)
 }
 
+// LoadFromFile loads configPath into c and remembers the path for reloads. An
+// empty configPath is a no-op. Every call parses the file with its own koanf
+// instance, so keys removed from the file since an earlier load do not linger.
 func (c *Config) LoadFromFile(configPath string) error {
-	if configPath != "" {
-		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-			return errors.Wrapf(err, "config file does not exist: %s", configPath)
-		}
+	if configPath == "" {
+		return nil
+	}
 
-		if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
-			return errors.Wrapf(err, "could not parse config file: %s", configPath)
-		}
+	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
+		return errors.Wrapf(err, "config file does not exist: %s", configPath)
+	}
 
-		// unmarshal
-		if err := k.Unmarshal("", &c); err != nil {
-			return errors.Wrapf(err, "could not unmarshal config file: %s", configPath)
+	k := koanf.New(".")
+
+	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
+		return errors.Wrapf(err, "could not parse config file: %s", configPath)
+	}
+
+	if err := k.Unmarshal("", c); err != nil {
+		return errors.Wrapf(err, "could not unmarshal config file: %s", configPath)
+	}
+
+	c.path = configPath
+
+	return nil
+}
+
+// Validate checks the settings the agent cannot run without.
+func (c *Config) Validate() error {
+	if c.Http.Token == "" {
+		return errors.New("http.token must be set; refusing to start without an API token")
+	}
+
+	for name, client := range c.Clients {
+		if client == nil || client.Host == "" {
+			return errors.Errorf("clients.%s.host must be set", name)
 		}
 	}
+
 	return nil
 }
 

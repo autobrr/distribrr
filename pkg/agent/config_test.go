@@ -1,10 +1,56 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+func TestConfig_LoadFromFile_removedKeyDoesNotSurvive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	writeFile(t, path, `
+agent:
+  labels:
+    network: 1G
+    disktype: ssd
+`)
+	first := NewConfig()
+	require.NoError(t, first.LoadFromFile(path))
+	assert.Equal(t, map[string]string{"network": "1G", "disktype": "ssd"}, first.Agent.Labels)
+
+	writeFile(t, path, `
+agent:
+  labels:
+    network: 1G
+`)
+	second := NewConfig()
+	require.NoError(t, second.LoadFromFile(path))
+	assert.Equal(t, map[string]string{"network": "1G"}, second.Agent.Labels)
+	assert.Equal(t, path, second.path)
+}
+
+func TestConfig_Validate(t *testing.T) {
+	cfg := NewConfig()
+	assert.Error(t, cfg.Validate(), "missing http token")
+
+	cfg.Http.Token = "secret"
+	assert.NoError(t, cfg.Validate())
+
+	cfg.Clients["qbit"] = &QbitClient{}
+	assert.Error(t, cfg.Validate(), "client without host")
+
+	cfg.Clients["qbit"] = nil
+	assert.Error(t, cfg.Validate(), "empty client entry")
+}
 
 func TestStorageRule_headroom(t *testing.T) {
 	const gb = 1_000_000_000 // humanize.ParseBytes treats "GB" as SI (10^9)

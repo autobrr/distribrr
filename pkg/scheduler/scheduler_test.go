@@ -120,80 +120,60 @@ func TestLeastActive_Score(t *testing.T) {
 				ctx: context.Background(),
 				t:   task.Task{},
 				nodes: []*node.Node{
-					{
-						Name:   "node0",
-						Labels: map[string]string{"disktype": "ssd", "region": "us-west-1"},
-						Status: node.StatusReady,
-						Stats: stats.Stats{
-							ClientStats: map[string]stats.ClientStats{
-								"node1": {
-									ActiveDownloadsCount:      0,
-									MaxActiveDownloadsAllowed: 1,
-									Status:                    stats.ClientStatusReady,
-									ActiveDownloads:           []qbittorrent.Torrent{},
-								},
+					testNode("node0", node.StatusReady, map[string]string{"disktype": "ssd", "region": "us-west-1"}, stats.Stats{
+						ClientStats: map[string]stats.ClientStats{
+							"node1": {
+								ActiveDownloadsCount:      0,
+								MaxActiveDownloadsAllowed: 1,
+								Status:                    stats.ClientStatusReady,
+								ActiveDownloads:           []qbittorrent.Torrent{},
 							},
 						},
-					},
-					{
-						Name:   "node1",
-						Labels: map[string]string{"disktype": "ssd", "region": "us-west-1"},
-						Status: node.StatusReady,
-						Stats: stats.Stats{
-							ClientStats: map[string]stats.ClientStats{
-								"node1": {
-									ActiveDownloadsCount:      1,
-									MaxActiveDownloadsAllowed: 2,
-									Status:                    stats.ClientStatusReady,
-									ActiveDownloads: []qbittorrent.Torrent{
-										{
-											Progress: 0.5,
-											ETA:      65,
-										},
+					}),
+					testNode("node1", node.StatusReady, map[string]string{"disktype": "ssd", "region": "us-west-1"}, stats.Stats{
+						ClientStats: map[string]stats.ClientStats{
+							"node1": {
+								ActiveDownloadsCount:      1,
+								MaxActiveDownloadsAllowed: 2,
+								Status:                    stats.ClientStatusReady,
+								ActiveDownloads: []qbittorrent.Torrent{
+									{
+										Progress: 0.5,
+										ETA:      65,
 									},
 								},
 							},
 						},
-					},
-					{
-						Name:   "node2",
-						Labels: map[string]string{"disktype": "ssd", "region": "us-west-1"},
-						Status: node.StatusReady,
-						Stats: stats.Stats{
-							ClientStats: map[string]stats.ClientStats{
-								"node1": {
-									ActiveDownloadsCount:      0,
-									MaxActiveDownloadsAllowed: 3,
-									Status:                    stats.ClientStatusReady,
-									ActiveDownloads:           []qbittorrent.Torrent{},
-								},
+					}),
+					testNode("node2", node.StatusReady, map[string]string{"disktype": "ssd", "region": "us-west-1"}, stats.Stats{
+						ClientStats: map[string]stats.ClientStats{
+							"node1": {
+								ActiveDownloadsCount:      0,
+								MaxActiveDownloadsAllowed: 3,
+								Status:                    stats.ClientStatusReady,
+								ActiveDownloads:           []qbittorrent.Torrent{},
 							},
 						},
-					},
-					{
-						Name:   "node3",
-						Labels: map[string]string{"disktype": "ssd", "region": "us-west-1"},
-						Status: node.StatusReady,
-						Stats: stats.Stats{
-							ClientStats: map[string]stats.ClientStats{
-								"node1": {
-									ActiveDownloadsCount:      2,
-									MaxActiveDownloadsAllowed: 3,
-									Status:                    stats.ClientStatusReady,
-									ActiveDownloads: []qbittorrent.Torrent{
-										{
-											Progress: 0.76,
-											ETA:      25,
-										},
-										{
-											Progress: 0.5,
-											ETA:      100,
-										},
+					}),
+					testNode("node3", node.StatusReady, map[string]string{"disktype": "ssd", "region": "us-west-1"}, stats.Stats{
+						ClientStats: map[string]stats.ClientStats{
+							"node1": {
+								ActiveDownloadsCount:      2,
+								MaxActiveDownloadsAllowed: 3,
+								Status:                    stats.ClientStatusReady,
+								ActiveDownloads: []qbittorrent.Torrent{
+									{
+										Progress: 0.76,
+										ETA:      25,
+									},
+									{
+										Progress: 0.5,
+										ETA:      100,
 									},
 								},
 							},
 						},
-					},
+					}),
 				},
 			},
 		},
@@ -262,8 +242,8 @@ func TestLeastActive_SelectCandidateNodes_rejections(t *testing.T) {
 	// both nodes are rejected without any network calls: "down" fails the
 	// status gate, "mismatch" fails label matching using its cached labels.
 	nodes := []*node.Node{
-		{Name: "down", Status: node.StatusUnknown, Labels: map[string]string{}},
-		{Name: "mismatch", Status: node.StatusReady, Labels: map[string]string{"region": "eu"}},
+		testNode("down", node.StatusUnknown, map[string]string{}, stats.Stats{}),
+		testNode("mismatch", node.StatusReady, map[string]string{"region": "eu"}, stats.Stats{}),
 	}
 
 	tsk := task.Task{Labels: map[string]string{"region": "us"}}
@@ -315,8 +295,8 @@ func TestLeastActive_SelectCandidateNodes_size(t *testing.T) {
 
 	newNode := func() *node.Node {
 		n := node.NewNode("node1", agentSrv.URL, "token", "worker")
-		n.Status = node.StatusReady
-		n.Labels = map[string]string{}
+		n.SetStatus(node.StatusReady)
+		n.SetLabels(map[string]string{})
 		return n
 	}
 
@@ -329,4 +309,15 @@ func TestLeastActive_SelectCandidateNodes_size(t *testing.T) {
 	candidates, rejected = r.SelectCandidateNodes(t.Context(), task.Task{Size: 50 * gb}, []*node.Node{newNode()})
 	assert.Empty(t, candidates)
 	assert.Equal(t, []NodeRejection{{Node: "node1", Reasons: []string{"no client has room for 50 GB"}}}, rejected)
+}
+
+// testNode builds a node with cached labels and stats, so the scheduler does
+// not call out to an agent for them.
+func testNode(name string, status node.Status, labels map[string]string, st stats.Stats) *node.Node {
+	n := node.NewNode(name, "http://127.0.0.1:0", "token", "worker")
+	n.SetStatus(status)
+	n.SetLabels(labels)
+	n.SetStats(st)
+
+	return n
 }

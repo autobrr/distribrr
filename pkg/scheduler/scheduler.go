@@ -45,8 +45,8 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 	var rejected []NodeRejection
 
 	for _, n := range nodes {
-		if n.Status != node.StatusReady {
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("node not ready (%s)", n.Status)}})
+		if status := n.Status(); status != node.StatusReady {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("node not ready (%s)", status)}})
 			continue
 		}
 
@@ -145,7 +145,7 @@ func (r *LeastActive) Score(ctx context.Context, t task.Task, nodes []*node.Node
 	for _, n := range nodes {
 		score := baseScore
 
-		for _, clientStats := range n.Stats.ClientStats {
+		for _, clientStats := range n.Stats().ClientStats {
 			if clientStats.ActiveDownloadsCount == 0 {
 				// Bonus for having no active downloads
 				score += noActiveBonus

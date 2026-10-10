@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -30,7 +31,15 @@ import (
 // shutdownTimeout bounds how long deregistering and in-flight requests get on shutdown.
 const shutdownTimeout = 30 * time.Second
 
+// registerInterval is how often Register retries joining the server, and how
+// long a single join attempt may take.
+const registerInterval = 10 * time.Second
+
 type Service struct {
+	// m guards cfg, clients, serverClient and controlNode. reload swaps cfg and
+	// clients for new values instead of changing them in place, so readers can
+	// keep using what they got after releasing the lock.
+	m   sync.RWMutex
 	cfg *Config
 
 	controlNode *controlNode
@@ -38,6 +47,11 @@ type Service struct {
 	dirUsage    dirUsageCache
 
 	serverClient *serverclient.Client
+
+	// reloadM serializes reloads and guards the dir usage loop fields.
+	reloadM          sync.Mutex
+	dirUsageCancel   context.CancelFunc
+	dirUsageWatching []string
 }
 
 type controlNode struct {
@@ -48,10 +62,8 @@ type controlNode struct {
 func NewService(cfg *Config) *Service {
 	s := &Service{
 		cfg:     cfg,
-		clients: map[string]*QbitClient{},
+		clients: buildClients(cfg),
 	}
-
-	s.initClients()
 
 	if s.cfg.Manager.Addr != "" && s.cfg.Manager.Token != "" {
 		s.serverClient = serverclient.NewClient(s.cfg.Manager.Addr, s.cfg.Manager.Token)
@@ -61,28 +73,42 @@ func NewService(cfg *Config) *Service {
 }
 
 func (s *Service) Run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 
-	srv := NewAPIServer(s.cfg, s)
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
+	srv := NewAPIServer(s.config(), s)
 
 	// register agent with server
 	go s.Register(ctx)
 
 	// keep dir usage for maxUsage rules measured in the background
-	go s.dirUsage.run(ctx, s.dirUsagePaths(), dirUsageInterval)
+	s.reloadM.Lock()
+	s.watchDirUsage(ctx, s.dirUsagePaths())
+	s.reloadM.Unlock()
 
 	errorChannel := make(chan error, 1)
 	go func() {
 		errorChannel <- srv.Open()
 	}()
 
-	select {
-	case err := <-errorChannel:
-		return errors.Wrap(err, "http server stopped")
-	case <-ctx.Done():
-		log.Info().Msg("got signal, shutting down agent")
+	for ctx.Err() == nil {
+		select {
+		case err := <-errorChannel:
+			return errors.Wrap(err, "http server stopped")
+		case <-hup:
+			log.Info().Msg("got SIGHUP, reloading config")
+			if err := s.reload(ctx); err != nil {
+				log.Error().Err(err).Msg("could not reload config, keeping the current config")
+			}
+		case <-ctx.Done():
+		}
 	}
+
+	log.Info().Msg("got signal, shutting down agent")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -101,8 +127,36 @@ func (s *Service) Run() error {
 	return nil
 }
 
-func (s *Service) initClients() {
-	for name, c := range s.cfg.Clients {
+// config returns the current config. It is replaced, never changed, on reload,
+// so callers must not modify it.
+func (s *Service) config() *Config {
+	s.m.RLock()
+	defer s.m.RUnlock()
+
+	return s.cfg
+}
+
+// getClients returns the current qbit clients. The map is replaced, never
+// changed, on reload, so callers must not modify it.
+func (s *Service) getClients() map[string]*QbitClient {
+	s.m.RLock()
+	defer s.m.RUnlock()
+
+	return s.clients
+}
+
+func (s *Service) joined() bool {
+	s.m.RLock()
+	defer s.m.RUnlock()
+
+	return s.controlNode != nil
+}
+
+// buildClients creates a qbit client for every client in cfg.
+func buildClients(cfg *Config) map[string]*QbitClient {
+	clients := make(map[string]*QbitClient, len(cfg.Clients))
+
+	for name, c := range cfg.Clients {
 		client := qbittorrent.NewClient(qbittorrent.Config{
 			Host:          c.Host,
 			Username:      c.User,
@@ -115,58 +169,189 @@ func (s *Service) initClients() {
 		})
 		c.Name = name
 		c.Client = client
-		s.clients[name] = c
+		clients[name] = c
 	}
+
+	return clients
 }
 
-func (s *Service) Register(ctx context.Context) {
-	tickerDuration := time.Second * 10
-	if err := s.registerAgentWithServer(ctx, tickerDuration); err != nil {
-		log.Error().Err(err).Msgf("could not register agent and join server: %s", s.cfg.Manager.Addr)
+// reload reads the config file again and applies it: qbit clients and their
+// rules, the dir usage loop, and the agent and manager sections, re-joining the
+// server when those change. The http section needs a restart and is kept. On
+// any error the current config stays in place.
+func (s *Service) reload(ctx context.Context) error {
+	s.reloadM.Lock()
+	defer s.reloadM.Unlock()
+
+	old := s.config()
+	if old.path == "" {
+		return errors.New("agent was started without a config file, nothing to reload")
 	}
 
-	ticker := time.NewTicker(tickerDuration)
+	cfg := NewConfig()
+	// start from the running http values so ones set by flags and absent from
+	// the file do not look changed
+	cfg.Http = old.Http
+
+	if err := cfg.LoadFromFile(old.path); err != nil {
+		return errors.Wrap(err, "could not load config")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return errors.Wrap(err, "invalid config")
+	}
+
+	if cfg.Http != old.Http {
+		log.Warn().Msg("http config changed, restart the agent to apply it")
+		cfg.Http = old.Http
+	}
+
+	clients := buildClients(cfg)
+
+	managerChanged := cfg.Manager != old.Manager
+
+	s.m.Lock()
+	oldServerClient := s.serverClient
+	rejoin := s.controlNode != nil && !sameRegistration(cfg, old)
+
+	s.cfg = cfg
+	s.clients = clients
+	if managerChanged {
+		// Join creates a client for the new manager
+		s.serverClient = nil
+	}
+	if rejoin {
+		s.controlNode = nil
+	}
+	s.m.Unlock()
+
+	if paths := s.dirUsagePaths(); !sameElements(paths, s.dirUsageWatching) {
+		s.watchDirUsage(ctx, paths)
+	}
+
+	log.Info().
+		Int("clients", len(clients)).
+		Bool("labels_changed", !maps.Equal(cfg.Agent.Labels, old.Agent.Labels)).
+		Bool("rejoin", rejoin).
+		Msg("reloaded config")
+
+	if rejoin {
+		// the server knows this agent by node name: when the name or the
+		// manager changes, the old registration would otherwise linger
+		if managerChanged || cfg.Agent.NodeName != old.Agent.NodeName {
+			if err := deregister(ctx, oldServerClient, old.Agent); err != nil {
+				log.Warn().Err(err).Msg("could not deregister previous registration")
+			}
+		}
+
+		go s.Register(ctx)
+	}
+
+	return nil
+}
+
+// watchDirUsage (re)starts the background dir usage loop for paths, stopping
+// the previous one. Callers must hold reloadM.
+func (s *Service) watchDirUsage(ctx context.Context, paths []string) {
+	if s.dirUsageCancel != nil {
+		s.dirUsageCancel()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	s.dirUsageCancel = cancel
+	s.dirUsageWatching = paths
+
+	go s.dirUsage.run(ctx, paths, dirUsageInterval)
+}
+
+func sameElements(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+
+	return slices.Equal(a, b)
+}
+
+// Register joins the server, retrying until it succeeds or ctx is done. Every
+// attempt reads the current config, so a reload applies to the next attempt.
+func (s *Service) Register(ctx context.Context) {
+	if err := s.registerAgentWithServer(ctx, registerInterval); err != nil {
+		log.Error().Err(err).Msgf("could not register agent and join server: %s", s.config().Manager.Addr)
+	}
+
+	ticker := time.NewTicker(registerInterval)
 	defer ticker.Stop()
 
-	for s.controlNode == nil {
+	for !s.joined() {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.registerAgentWithServer(ctx, tickerDuration); err != nil {
-				log.Error().Err(err).Msgf("could not register agent and join server: %s", s.cfg.Manager.Addr)
+			if err := s.registerAgentWithServer(ctx, registerInterval); err != nil {
+				log.Error().Err(err).Msgf("could not register agent and join server: %s", s.config().Manager.Addr)
 			}
 		}
 	}
 }
 
 func (s *Service) registerAgentWithServer(ctx context.Context, tickerDuration time.Duration) error {
-	log.Debug().Msgf("preparing to register agent and join server: %s", s.cfg.Manager.Addr)
+	cfg := s.config()
+
+	log.Debug().Msgf("preparing to register agent and join server: %s", cfg.Manager.Addr)
 
 	// Create a new context that will be done after tickerDuration
 	ctx, cancel := context.WithTimeout(ctx, tickerDuration)
 	defer cancel()
-	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent, s.cfg.Http.Token); err != nil {
+	if err := s.Join(ctx, cfg.Manager.Addr, cfg.Manager.Token, cfg.Agent, cfg.Http.Token); err != nil {
 		return err
+	}
+
+	// a reload during the join may have changed what the server should know
+	if !sameRegistration(cfg, s.config()) {
+		s.m.Lock()
+		s.controlNode = nil
+		s.m.Unlock()
+
+		return errors.New("config reloaded while joining, joining again")
 	}
 
 	return nil
 }
 
+// sameRegistration reports whether a and b register the agent with the server
+// the same way.
+func sameRegistration(a, b *Config) bool {
+	return a.Manager == b.Manager && reflect.DeepEqual(a.Agent, b.Agent)
+}
+
 func (s *Service) Deregister(ctx context.Context) error {
+	s.m.RLock()
+	joined := s.controlNode != nil
+	sc := s.serverClient
+	agent := s.cfg.Agent
+	s.m.RUnlock()
+
 	// never joined, nothing to deregister
-	if s.controlNode == nil {
+	if !joined {
+		return nil
+	}
+
+	return deregister(ctx, sc, agent)
+}
+
+func deregister(ctx context.Context, sc *serverclient.Client, agent Agent) error {
+	if sc == nil {
 		return nil
 	}
 
 	log.Info().Msgf("deregister node with server")
 
 	req := serverclient.DeregisterRequest{
-		NodeName:   s.cfg.Agent.NodeName,
-		ClientAddr: s.cfg.Agent.ClientAddr,
+		NodeName:   agent.NodeName,
+		ClientAddr: agent.ClientAddr,
 	}
 
-	if err := s.serverClient.DeregisterRequest(ctx, req); err != nil {
+	if err := sc.DeregisterRequest(ctx, req); err != nil {
 		log.Error().Err(err).Msg("could not deregister node")
 		return err
 	}
@@ -178,9 +363,12 @@ func (s *Service) Deregister(ctx context.Context) error {
 func (s *Service) Join(ctx context.Context, addr string, token string, agent Agent, agentToken string) error {
 	log.Info().Msgf("sending join request to: %s", addr)
 
+	s.m.Lock()
 	if s.serverClient == nil {
 		s.serverClient = serverclient.NewClient(addr, token)
 	}
+	sc := s.serverClient
+	s.m.Unlock()
 
 	nodeName := agent.NodeName
 	if nodeName == "" {
@@ -194,8 +382,6 @@ func (s *Service) Join(ctx context.Context, addr string, token string, agent Age
 		}
 	}
 
-	//s.serverClient = serverclient.NewClient(addr, token)
-
 	joinReq := serverclient.JoinRequest{
 		NodeName:   nodeName,
 		ClientAddr: agent.ClientAddr,
@@ -203,17 +389,19 @@ func (s *Service) Join(ctx context.Context, addr string, token string, agent Age
 		Token:      agentToken,
 	}
 
-	if err := s.serverClient.JoinRequest(ctx, joinReq); err != nil {
+	if err := sc.JoinRequest(ctx, joinReq); err != nil {
 		return err
 	}
 
 	log.Info().Msgf("successfully joined manager: %s", addr)
 
 	// set controlNode
+	s.m.Lock()
 	s.controlNode = &controlNode{
 		Addr:  addr,
 		Token: token,
 	}
+	s.m.Unlock()
 
 	return nil
 }
@@ -341,13 +529,13 @@ var ErrInsufficientStorage = errors.New("insufficient storage")
 // returns ErrInsufficientStorage when no client has room.
 func (s *Service) clientsWithRoom(ctx context.Context, size uint64) ([]*QbitClient, error) {
 	if size == 0 {
-		return slices.Collect(maps.Values(s.clients)), nil
+		return slices.Collect(maps.Values(s.getClients())), nil
 	}
 
 	var clients []*QbitClient
 	var skipped []string
 
-	for _, client := range s.clients {
+	for _, client := range s.getClients() {
 		ct := s.clientStats(ctx, client, map[string]*linux.Disk{})
 
 		if !ct.HasRoomFor(size) {
@@ -417,7 +605,7 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 	log.Trace().Msg("collecting client stats")
 
 	// TODO use errgroup
-	for name, client := range s.clients {
+	for name, client := range s.getClients() {
 		st.ClientStats[name] = s.clientStats(ctx, client, st.DiskPathStats)
 	}
 }
@@ -686,7 +874,7 @@ func (c *dirUsageCache) run(ctx context.Context, paths []string, interval time.D
 // the only ones that need their dir usage measured.
 func (s *Service) dirUsagePaths() []string {
 	var paths []string
-	for _, client := range s.clients {
+	for _, client := range s.getClients() {
 		for _, storage := range client.Rules.Storage {
 			if storage.MaxUsage != "" && !slices.Contains(paths, storage.Path) {
 				paths = append(paths, storage.Path)
@@ -698,5 +886,5 @@ func (s *Service) dirUsagePaths() []string {
 }
 
 func (s *Service) GetLabels() map[string]string {
-	return s.cfg.Agent.Labels
+	return s.config().Agent.Labels
 }
