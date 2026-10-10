@@ -106,10 +106,11 @@ type StorageRule struct {
 	MaxUsage string `yaml:"maxUsage"`
 }
 
-// allows reports whether a storage path with the given free and used bytes
-// satisfies the rule's minFree / maxUsage thresholds. An empty threshold is
-// ignored. A non-nil error means a configured threshold could not be parsed;
-// callers should log it and treat the rule as non-binding.
+// allows reports whether a storage path satisfies the rule's minFree / maxUsage
+// thresholds. free is the space left on the filesystem; used is the space taken
+// by the files under the path itself, not the whole filesystem. An empty
+// threshold is ignored. A non-nil error means a configured threshold could not
+// be parsed; callers should log it and treat the rule as non-binding.
 func (r StorageRule) allows(free, used uint64) (bool, error) {
 	if r.MinFree != "" {
 		minFree, err := humanize.ParseBytes(r.MinFree)

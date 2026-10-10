@@ -1,6 +1,8 @@
 package stats
 
 import (
+	"io/fs"
+	"path/filepath"
 	"syscall"
 
 	"github.com/autobrr/go-qbittorrent"
@@ -195,6 +197,55 @@ func GetDiskInfoByPath(path string) (*linux.Disk, error) {
 	}
 
 	return disk, nil
+}
+
+// GetDirUsage returns the disk space used by the files under path, the way du
+// counts it: allocated blocks rather than apparent size, with hardlinked files
+// counted once. Entries below path that cannot be read are skipped (e.g. a
+// root-owned lost+found on a mount point); an unreadable path itself is an error.
+func GetDirUsage(path string) (uint64, error) {
+	var total uint64
+	seen := map[[2]uint64]struct{}{}
+
+	err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if p == path {
+				return err
+			}
+
+			log.Debug().Err(err).Msgf("skipping unreadable path %q", p)
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			log.Debug().Err(err).Msgf("skipping unreadable path %q", p)
+			return nil
+		}
+
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			total += uint64(info.Size())
+			return nil
+		}
+
+		if !d.IsDir() && st.Nlink > 1 {
+			key := [2]uint64{uint64(st.Dev), uint64(st.Ino)}
+			if _, ok := seen[key]; ok {
+				return nil
+			}
+			seen[key] = struct{}{}
+		}
+
+		total += uint64(st.Blocks) * 512
+
+		return nil
+	})
+	if err != nil {
+		return 0, errors.Wrapf(err, "could not read dir usage for path %q", path)
+	}
+
+	return total, nil
 }
 
 // GetCpuStats GetCpuInfo See https://godoc.org/github.com/c9s/goprocinfo/linux#CPUStat

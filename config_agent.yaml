@@ -26,6 +26,8 @@ clients:
       storage:
         - path: /home/user/torrents
           tier: 0
+          # minFree: space that must stay free on the filesystem
+          # maxUsage: max space the files under path may take (like du), not the whole filesystem
           minFree: 50GB
           maxUsage: 1200GB
 

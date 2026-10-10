@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 type Service struct {
@@ -23,6 +25,7 @@ type Service struct {
 
 	controlNode *controlNode
 	clients     map[string]*QbitClient
+	dirUsage    dirUsageCache
 
 	serverClient *serverclient.Client
 }
@@ -363,7 +366,7 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 
 		l.Trace().Msg("check disk per path for client")
 
-		storageReasons := checkStorage(l, client.Rules.Storage, st)
+		storageReasons := checkStorage(l, client.Rules.Storage, st, s.dirUsage.get)
 
 		l.Trace().Msg("get active torrents for client")
 
@@ -432,8 +435,9 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 // checkStorage checks every storage rule against its path and records the disk
 // stats in st. It returns ReasonDiskFull when a readable path breaks its
 // minFree / maxUsage rule, and ReasonStorageUnavailable when a path cannot be
-// read at all (missing mount, typo), so the two are not confused.
-func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats) []stats.NotReadyReason {
+// read at all (missing mount, typo), so the two are not confused. dirUsage
+// measures the space used under a path and is only called for maxUsage rules.
+func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats, dirUsage func(path string) (uint64, error)) []stats.NotReadyReason {
 	diskFull := false
 	unavailable := false
 
@@ -449,7 +453,17 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats) []stat
 
 		st.DiskPathStats[storage.Path] = disk
 
-		allowed, err := storage.allows(disk.Free, disk.Used)
+		var used uint64
+		if storage.MaxUsage != "" {
+			used, err = dirUsage(storage.Path)
+			if err != nil {
+				unavailable = true
+				l.Error().Err(err).Msgf("could not measure usage of storage path %q", storage.Path)
+				continue
+			}
+		}
+
+		allowed, err := storage.allows(disk.Free, used)
 		if err != nil {
 			// bad threshold config: log and treat the rule as non-binding
 			l.Warn().Err(err).Msgf("ignoring storage rule for path %q", storage.Path)
@@ -458,7 +472,7 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats) []stat
 
 		if !allowed {
 			diskFull = true
-			l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, disk.Used)
+			l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, used)
 		}
 	}
 
@@ -471,6 +485,54 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats) []stat
 	}
 
 	return reasons
+}
+
+// dirUsageTTL is how long a measured dir usage is reused. Walking a large torrent
+// directory is slow, and /stats is called for every task the server schedules.
+const dirUsageTTL = time.Minute
+
+type dirUsageEntry struct {
+	used uint64
+	at   time.Time
+}
+
+// dirUsageCache caches stats.GetDirUsage per path for dirUsageTTL. Concurrent
+// lookups of the same path share one walk. The zero value is ready to use.
+type dirUsageCache struct {
+	m       sync.Mutex
+	entries map[string]dirUsageEntry
+	group   singleflight.Group
+}
+
+func (c *dirUsageCache) get(path string) (uint64, error) {
+	c.m.Lock()
+	e, ok := c.entries[path]
+	c.m.Unlock()
+
+	if ok && time.Since(e.at) < dirUsageTTL {
+		return e.used, nil
+	}
+
+	v, err, _ := c.group.Do(path, func() (any, error) {
+		used, err := stats.GetDirUsage(path)
+		if err != nil {
+			return uint64(0), err
+		}
+
+		c.m.Lock()
+		if c.entries == nil {
+			c.entries = map[string]dirUsageEntry{}
+		}
+		c.entries[path] = dirUsageEntry{used: used, at: time.Now()}
+		c.m.Unlock()
+
+		return used, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return v.(uint64), nil
 }
 
 func (s *Service) GetLabels() map[string]string {
