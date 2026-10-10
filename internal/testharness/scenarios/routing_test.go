@@ -190,3 +190,60 @@ func TestTask_qbitRejectsAdd(t *testing.T) {
 		assert.Len(t, goodQbit.Added(), 1)
 	})
 }
+
+func TestSchedulerType(t *testing.T) {
+	t.Parallel()
+
+	t.Run("round robin takes turns even when one agent is busier", func(t *testing.T) {
+		e := newEnv(t)
+
+		busy, busyQbit := e.agent(t, "busy", nil)
+		idle, idleQbit := e.agent(t, "idle", nil)
+
+		// least active would send every task to idle
+		busyQbit.SetActiveDownloads(fakeqbit.Torrent{Hash: "a", Name: "Busy", Size: 100 * mb, AmountLeft: 90 * mb, Progress: 0.1, ETA: 3600})
+		e.WaitReady(t, busy, idle)
+
+		for range 4 {
+			tk := e.release("RoundRobin.Release-GRP", 10*mb)
+			tk.SchedulerType = "round_robin"
+
+			status, body := e.Webhook(t, tk)
+			require.Equal(t, http.StatusCreated, status, body)
+		}
+
+		assert.Len(t, busyQbit.Added(), 2)
+		assert.Len(t, idleQbit.Added(), 2)
+	})
+
+	for _, schedulerType := range []string{"", "least_active"} {
+		t.Run("least active accepts '"+schedulerType+"'", func(t *testing.T) {
+			e := newEnv(t)
+
+			a, q := e.agent(t, "node1", nil)
+			e.WaitReady(t, a)
+
+			tk := e.release("LeastActive.Release-GRP", 10*mb)
+			tk.SchedulerType = schedulerType
+
+			status, body := e.Webhook(t, tk)
+			require.Equal(t, http.StatusCreated, status, body)
+			assert.Len(t, q.Added(), 1)
+		})
+	}
+
+	t.Run("unknown type is rejected", func(t *testing.T) {
+		e := newEnv(t)
+
+		a, q := e.agent(t, "node1", nil)
+		e.WaitReady(t, a)
+
+		tk := e.release("Unknown.Release-GRP", 10*mb)
+		tk.SchedulerType = "greedy"
+
+		status, body := e.Webhook(t, tk)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Contains(t, body, "unknown scheduler type")
+		assert.Empty(t, q.Added())
+	})
+}

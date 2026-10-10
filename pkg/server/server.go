@@ -52,6 +52,9 @@ type Service struct {
 	workerNodes []*node.Node
 	m           sync.RWMutex
 
+	// roundRobin is shared by every task so the turn carries over.
+	roundRobin *scheduler.RoundRobin
+
 	log zerolog.Logger
 }
 
@@ -63,6 +66,7 @@ func NewService(cfg *Config) *Service {
 
 		cfg:         cfg,
 		workerNodes: make([]*node.Node, 0),
+		roundRobin:  &scheduler.RoundRobin{},
 		log:         log.Logger.With().Str("module", "server").Logger(),
 		m:           sync.RWMutex{},
 	}
@@ -538,9 +542,24 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 	return nil
 }
 
+// schedulerFor returns the scheduler a task asks for, least active if it asks
+// for none.
+func (s *Service) schedulerFor(schedulerType string) (scheduler.Scheduler, error) {
+	switch schedulerType {
+	case "", scheduler.TypeLeastActive:
+		return &scheduler.LeastActive{}, nil
+	case scheduler.TypeRoundRobin:
+		return s.roundRobin, nil
+	}
+
+	return nil, errors.Wrapf(scheduler.ErrUnknownType, "'%s', want %s or %s", schedulerType, scheduler.TypeLeastActive, scheduler.TypeRoundRobin)
+}
+
 func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node, []scheduler.NodeRejection, error) {
-	// hardcoded scheduler for now
-	var sc scheduler.LeastActive
+	sc, err := s.schedulerFor(t.SchedulerType)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// select candidates
 	candidates, rejected := sc.SelectCandidateNodes(ctx, t, s.GetNodes())
@@ -576,35 +595,6 @@ func summarizeRejections(rejections []scheduler.NodeRejection) string {
 
 	return strings.Join(parts, "; ")
 }
-
-//func (s *Service) SelectWorkers(t task.Task) ([]*node.Node, error) {
-//	var scdl scheduler.Scheduler
-//	switch t.SchedulerType {
-//	case "greedy":
-//		scdl = &scheduler.Greedy{Name: "greedy"}
-//	case "roundrobin":
-//		scdl = &scheduler.RoundRobin{Name: "roundrobin"}
-//	default:
-//		scdl = &scheduler.Epvm{Name: "epvm"}
-//	}
-//
-//	// select candidates
-//	candidates := scdl.SelectCandidateNodes(t, s.workerNodes)
-//	if candidates == nil {
-//		return nil, errors.Errorf("no available candidates match resource request for task: %v", t)
-//	}
-//
-//	// score
-//	scores := scdl.Score(t, candidates)
-//	if scores == nil {
-//		return nil, errors.Errorf("no scores to task: %v", t)
-//	}
-//
-//	// pick
-//	nodes := scdl.Pick(scores, candidates)
-//
-//	return nodes, nil
-//}
 
 func (s *Service) AddTask(ctx context.Context, te task.Event) error {
 	// TODO add to queue
