@@ -81,8 +81,10 @@ type ClientStats struct {
 	StorageHeadroom *uint64 `json:"storage_headroom,omitempty"`
 }
 
+// HasAvailableSlot reports whether the client is below its max active
+// downloads. A limit of 0 means unlimited.
 func (c *ClientStats) HasAvailableSlot() bool {
-	return c.ActiveDownloadsCount < c.MaxActiveDownloadsAllowed
+	return c.MaxActiveDownloadsAllowed == 0 || c.ActiveDownloadsCount < c.MaxActiveDownloadsAllowed
 }
 
 // HasRoomFor reports whether a torrent of size bytes fits within the client's

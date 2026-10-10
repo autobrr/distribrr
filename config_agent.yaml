@@ -36,6 +36,6 @@ clients:
           minFree: 50GB
 
       torrents:
-        maxActiveDownloads: 3
+        maxActiveDownloads: 3 # 0 = unlimited
         maxTotalDownloads: 3
         maxTotalTorrents: 100

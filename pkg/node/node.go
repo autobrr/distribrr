@@ -221,5 +221,12 @@ func (n *Node) GetLabels(ctx context.Context) (map[string]string, error) {
 		return nil, err
 	}
 
+	if labels == nil {
+		labels = map[string]string{}
+	}
+
+	// cache them; the agent sends new labels when it registers again
+	n.SetLabels(labels)
+
 	return labels, nil
 }

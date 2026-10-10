@@ -36,6 +36,7 @@ make build                 # deps + static linux/amd64 binary -> bin/distribrr (
 go build ./...             # quick compile check (any host arch)
 go test ./...              # all tests
 go test ./pkg/scheduler/ -run TestLeastActive_Score -v   # single test
+go test -race ./internal/testharness/scenarios/   # end-to-end scenarios: in-process server + agents, fake qbit + tracker (~2s)
 go vet ./...
 nilaway ./...              # only configured linter; CI runs it continue-on-error, not yet clean
 ```
@@ -58,6 +59,8 @@ restart on both; a bad file is logged and the old config kept.
   then **saves the node to the server's own config file** before updating memory. The server config is mutable state,
   not just input.
 - Nodes are identified by name: re-registering updates the existing node's addr, token and labels (and revives a
+- Node labels are saved in the server config (`nodes[].labels`) on register, so they survive restarts. Nodes without
+  saved labels fetch them from the agent once and cache them.
   `REMOVED` node) instead of adding a duplicate.
 - Deregister flips the node to `REMOVED` on purpose; it stays in memory and in the config file. Unknown names give 404.
 - `HealthChecks` pings every non-removed agent every 10s and sets `READY` / `UNKNOWN`.
@@ -69,7 +72,9 @@ restart on both; a bad file is logged and the old config kept.
 
 ### Client readiness and storage (`pkg/agent/agent.go`)
 `clientStats` decides each qbit client's `READY` / `NOT_READY` status and its `NotReadyReason`s (defined in `pkg/stats`: `max_downloads_reached`, `disk_full`, `client_unreachable`, `storage_unavailable`, `storage_measuring`). A client can report several reasons.
-- Downloads: ready while active downloads < `rules.torrents.maxActiveDownloads`. Exactly at the limit it is still ready if one active torrent is ≥75% done with ETA ≤60s.
+
+- Downloads: ready while active downloads < `rules.torrents.maxActiveDownloads` (0 means unlimited). Exactly at the
+  limit it is still ready if one active torrent is ≥75% done with ETA ≤60s.
 - Storage: `checkStorage` applies each `rules.storage` entry (`StorageRule.headroom` in `config.go`). `minFree` is free space on the path's filesystem. `maxUsage` is the space the files under the path take, du-style (`stats.GetDirUsage`), not the filesystem.
 - `maxUsage` paths are walked in the background by `dirUsageCache.run` every minute; stats only read the cache. Until the first walk finishes the client reports `storage_measuring`.
 - The remaining bytes of active downloads are reserved against both rules, unless qbit's `preallocate_all` is on (`reservedBytes`).
@@ -77,7 +82,10 @@ restart on both; a bad file is logged and the old config kept.
 
 ### Tasks and size
 - `task.Task.Size` (`size`, bytes) is optional: 0 means unknown; autobrr fills it with `{{ .Size }}`.
-- Agent `StartTask` adds the torrent only to clients with room (`clientsWithRoom`), not to all clients. With a known size it checks before fetching the `.torrent`, then re-checks with the exact size from the `.torrent`. No client with room returns `ErrInsufficientStorage`, which the API maps to HTTP 507.
+- Agent `StartTask` adds the torrent only to `READY` clients with room (`readyClients`), not to all clients. It checks
+  before fetching the `.torrent` (with the webhook size, if any), then re-checks with the exact size from the
+  `.torrent`. No ready client returns `ErrNoReadyClients` (HTTP 503); no ready client with room returns
+  `ErrInsufficientStorage` (HTTP 507).
 - After adding, the agent re-announces in a goroutine.
 
 ### The two HTTP clients (directionality is the confusing part)
@@ -87,7 +95,11 @@ restart on both; a bad file is logged and the old config kept.
 
 ### Scheduling: `pkg/scheduler`
 `LeastActive` is the only implementation and is hardcoded in `server.selectWorkers`. The `Scheduler` interface exists but nothing dispatches through it; greedy/roundrobin/epvm appear only in a commented-out `SelectWorkers` in `pkg/server/server.go`. Three phases:
-1. `SelectCandidateNodes`: keeps nodes that are `READY`, whose labels match the task (`checkLabels`: every task label must be present and equal on the node), whose clients are all `READY`, and, when `size` is set, where at least one client has room (`hasRoomFor`). Every rejected node gets a `NodeRejection` with reasons.
+
+1. `SelectCandidateNodes`: keeps nodes that are `READY`, whose labels match the task (`checkLabels`: every task label
+   must be present and equal on the node), with at least one `READY` client, and, when `size` is set, where at least one
+   ready client has room (`hasRoomFor`). A node with no ready client is rejected with every client's reasons. Every
+   rejected node gets a `NodeRejection` with reasons.
 2. `Score`: base 100, +20 per client with zero active downloads, minus per-torrent penalties weighted by remaining progress and ETA.
 3. `PickN`: sort by score descending, take `task.MaxAllowedReplicas` nodes (default 1, capped at the candidate count).
 
@@ -95,6 +107,15 @@ restart on both; a bad file is logged and the old config kept.
 - One shared token. `pkg/middleware.IsAuthenticated` checks, in order, `X-API-Token`, the raw `Authorization` header (no `Bearer` scheme), then `?apikey=`. The first one present decides; no credential gives 401. Comparison is plain `!=`, not constant-time.
 - Config is koanf + YAML (`pkg/server/config.go`, `pkg/agent/config.go`). koanf matches keys to struct fields by name, so the `yaml:` tags only matter where the server marshals its config back to disk.
 - Some keys in `config_agent.yaml` are read by no code: `type`, `paths`, `tier`, `maxTotalDownloads`, `maxTotalTorrents`.
+
+## Integration tests
+
+`internal/testharness` runs a real server and N agents in-process over HTTP (`Service.Serve(ctx, ln, reload)`, with
+timings shortened through exported Service fields). Agents talk to `fakeqbit` (an in-memory qBittorrent WebUI covering
+the endpoints go-qbittorrent calls) and fetch `.torrent` files from `faketracker`. `harness.go` gives `New`,
+`AddAgent(AgentSpec{...})`, `Webhook`, `WaitReady`/`WaitNode`, agent `Stop`/`Kill`/`Restart`/`Reload`, and
+`ReloadServer`. Add a scenario to `internal/testharness/scenarios` for any change to scheduling, readiness, storage or
+node lifecycle.
 
 ## Conventions and current state
 - Log with `zerolog` (`github.com/rs/zerolog/log`); `pkg/logger` gives a context-aware logger and `pkg/middleware` injects a correlation ID per request.

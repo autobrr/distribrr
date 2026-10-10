@@ -18,8 +18,6 @@ import (
 )
 
 type APIServer struct {
-	host  string
-	port  string
 	token string
 
 	service *Service
@@ -28,8 +26,6 @@ type APIServer struct {
 
 func NewAPIServer(cfg *Config, svc *Service) *APIServer {
 	s := &APIServer{
-		host:    cfg.Http.Host,
-		port:    cfg.Http.Port,
 		token:   cfg.Http.Token,
 		service: svc,
 	}
@@ -41,17 +37,12 @@ func NewAPIServer(cfg *Config, svc *Service) *APIServer {
 	return s
 }
 
-func (s *APIServer) Open() error {
-	addr := net.JoinHostPort(s.host, s.port)
+// Serve serves the API on ln until Shutdown is called or serving fails. It
+// closes ln when it returns, and returns nil after Shutdown.
+func (s *APIServer) Serve(ln net.Listener) error {
+	log.Info().Msgf("listening on: %s", ln.Addr())
 
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return errors.Wrapf(err, "could not open listener on: %s", addr)
-	}
-
-	log.Info().Msgf("listening on: %s", listener.Addr())
-
-	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := s.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 

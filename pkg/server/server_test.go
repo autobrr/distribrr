@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ func Test_summarizeRejections(t *testing.T) {
 	assert.Equal(t, "node1 (client qbit: disk_full); node2 (node not ready (UNKNOWN))", got)
 }
 
-func TestAPIServer_Open_portInUse(t *testing.T) {
+func TestService_Run_portInUse(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer l.Close()
@@ -40,9 +41,8 @@ func TestAPIServer_Open_portInUse(t *testing.T) {
 	cfg.Http.Host = "127.0.0.1"
 	cfg.Http.Port = port
 
-	srv := NewAPIServer(cfg, NewService(cfg))
-
-	assert.Error(t, srv.Open())
+	err = NewService(cfg).Run()
+	assert.ErrorContains(t, err, "could not open listener on")
 }
 
 func TestConfig_WriteToFile_error(t *testing.T) {
@@ -119,7 +119,7 @@ func TestService_OnRegister_newNode(t *testing.T) {
 	assert.Equal(t, agentSrv.URL, nodes[0].Addr())
 	assert.Equal(t, map[string]string{"region": "eu"}, nodes[0].Labels())
 
-	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token"}}, s.cfg.Nodes)
+	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token", Labels: map[string]string{"region": "eu"}}}, s.cfg.Nodes)
 	assert.Equal(t, s.cfg.Nodes, readConfigNodes(t, configFile))
 }
 
@@ -157,7 +157,7 @@ func TestService_OnRegister_updatesExistingNode(t *testing.T) {
 	// the rebuilt agent client talks to the new agent with the new token
 	require.NoError(t, nodes[0].VerifyToken(t.Context()))
 
-	want := []*AgentNode{{Name: "node1", Addr: newAgent.URL, Token: "new-token"}}
+	want := []*AgentNode{{Name: "node1", Addr: newAgent.URL, Token: "new-token", Labels: map[string]string{"region": "us"}}}
 	assert.Equal(t, want, s.cfg.Nodes)
 	assert.Equal(t, want, readConfigNodes(t, configFile))
 }
@@ -204,7 +204,7 @@ func TestService_OnRegister_writeErrorOnUpdate(t *testing.T) {
 	require.Len(t, nodes, 1)
 	assert.Equal(t, oldAgent.URL, nodes[0].Addr())
 	assert.Equal(t, "old-token", nodes[0].Token())
-	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: oldAgent.URL, Token: "old-token"}}, s.cfg.Nodes)
+	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: oldAgent.URL, Token: "old-token", Labels: map[string]string{"region": "eu"}}}, s.cfg.Nodes)
 }
 
 func TestService_Deregister(t *testing.T) {
@@ -218,7 +218,7 @@ func TestService_Deregister(t *testing.T) {
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
 	assert.Equal(t, node.Status(node.StatusRemoved), nodes[0].Status())
-	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token"}}, readConfigNodes(t, configFile))
+	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token", Labels: map[string]string{"region": "eu"}}}, readConfigNodes(t, configFile))
 
 	err := s.Deregister(t.Context(), DeregisterRequest{NodeName: "unknown"})
 	assert.ErrorIs(t, err, ErrNodeNotFound)
@@ -226,14 +226,15 @@ func TestService_Deregister(t *testing.T) {
 
 func TestAPIServer_Shutdown(t *testing.T) {
 	cfg := NewConfig()
-	cfg.Http.Host = "127.0.0.1"
-	cfg.Http.Port = "0"
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
 
 	srv := NewAPIServer(cfg, NewService(cfg))
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.Open()
+		errCh <- srv.Serve(ln)
 	}()
 
 	require.NoError(t, srv.Shutdown(t.Context()))
@@ -242,7 +243,7 @@ func TestAPIServer_Shutdown(t *testing.T) {
 	case err := <-errCh:
 		assert.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("Open did not return after Shutdown")
+		t.Fatal("Serve did not return after Shutdown")
 	}
 }
 
@@ -476,4 +477,161 @@ nodes:
 		names = append(names, n.Name)
 	}
 	assert.ElementsMatch(t, []string{"node1", "node2"}, names)
+}
+
+// serve runs s.Serve on a random local port and returns its base url, the
+// reload channel and a func that cancels ctx and returns Serve's error. The
+// test cleanup stops it too.
+func serve(t *testing.T, s *Service) (string, chan<- struct{}, func() error) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	reload := make(chan struct{})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Serve(ctx, ln, reload)
+	}()
+
+	stop := sync.OnceValue(func() error {
+		cancel()
+
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after ctx was cancelled")
+			return nil
+		}
+	})
+	t.Cleanup(func() { stop() })
+
+	return "http://" + ln.Addr().String(), reload, stop
+}
+
+func TestService_Serve(t *testing.T) {
+	s := newTestService(t, "")
+
+	url, _, stop := serve(t, s)
+
+	resp, err := http.Get(url + "/api/v1/healthz/liveness")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.NoError(t, stop())
+
+	// the listener is closed
+	_, err = http.Get(url + "/api/v1/healthz/liveness")
+	assert.Error(t, err)
+}
+
+func TestService_Serve_reload(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig(t, configFile, `
+http:
+  token: server-token
+`)
+
+	cfg := NewConfig()
+	require.NoError(t, cfg.LoadFromFile(configFile))
+	s := NewService(cfg)
+
+	_, reload, stop := serve(t, s)
+
+	writeConfig(t, configFile, `
+http:
+  token: server-token
+nodes:
+  - name: node1
+    addr: http://node1:7430
+    token: token1
+`)
+
+	reload <- struct{}{}
+
+	require.Eventually(t, func() bool {
+		nodes := s.GetNodes()
+		return len(nodes) == 1 && nodes[0].Name == "node1"
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, stop())
+}
+
+func TestService_Serve_healthChecks(t *testing.T) {
+	agentSrv := fakeAgent(t, "agent-token")
+
+	cfg := NewConfig()
+	cfg.Nodes = []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token"}}
+
+	s := NewService(cfg)
+	s.HealthCheckInterval = 10 * time.Millisecond
+
+	_, _, stop := serve(t, s)
+
+	// the fake agent only serves verify, so the health check fails
+	require.Eventually(t, func() bool {
+		return s.GetNodes()[0].Status() == node.StatusUnknown
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, stop())
+}
+
+func TestService_nodeLabelsFromConfig(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+
+	writeConfig(t, configFile, `
+http:
+  token: server-token
+nodes:
+  - name: labelled
+    addr: http://labelled:7430
+    token: t
+    labels:
+      region: eu
+  - name: legacy
+    addr: http://legacy:7430
+    token: t
+`)
+
+	cfg := NewConfig()
+	require.NoError(t, cfg.LoadFromFile(configFile))
+	s := NewService(cfg)
+
+	byName := func() map[string]*node.Node {
+		m := make(map[string]*node.Node)
+		for _, n := range s.GetNodes() {
+			m[n.Name] = n
+		}
+		return m
+	}
+
+	nodes := byName()
+	assert.Equal(t, map[string]string{"region": "eu"}, nodes["labelled"].Labels())
+	assert.Nil(t, nodes["legacy"].Labels(), "an entry without labels is fetched from the agent")
+
+	nodes["legacy"].SetLabels(map[string]string{"disk": "ssd"})
+
+	// new labels in the file apply; an entry without labels keeps the cached ones
+	writeConfig(t, configFile, `
+http:
+  token: server-token
+nodes:
+  - name: labelled
+    addr: http://labelled:7430
+    token: t
+    labels:
+      region: us
+  - name: legacy
+    addr: http://legacy:7430
+    token: t
+`)
+	require.NoError(t, s.Reload())
+
+	nodes = byName()
+	assert.Equal(t, map[string]string{"region": "us"}, nodes["labelled"].Labels())
+	assert.Equal(t, map[string]string{"disk": "ssd"}, nodes["legacy"].Labels())
 }
