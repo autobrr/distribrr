@@ -153,8 +153,8 @@ func (s *Service) Reload() error {
 		}
 
 		workerNode := s.workerNodes[idx]
-		if workerNode.Addr != entry.Addr || workerNode.Token != entry.Token {
-			workerNode.Update(entry.Addr, entry.Token, workerNode.Labels)
+		if workerNode.Addr() != entry.Addr || workerNode.Token() != entry.Token {
+			workerNode.Update(entry.Addr, entry.Token, workerNode.Labels())
 			updated++
 
 			s.log.Debug().Msgf("reload: updated node %s %s", entry.Name, entry.Addr)
@@ -162,11 +162,11 @@ func (s *Service) Reload() error {
 	}
 
 	for _, workerNode := range s.workerNodes {
-		if _, ok := inFile[workerNode.Name]; ok || workerNode.Status == node.StatusRemoved {
+		if _, ok := inFile[workerNode.Name]; ok || workerNode.Status() == node.StatusRemoved {
 			continue
 		}
 
-		workerNode.Status = node.StatusRemoved
+		workerNode.SetStatus(node.StatusRemoved)
 		removed++
 
 		s.log.Debug().Msgf("reload: removed node %s", workerNode.Name)
@@ -196,7 +196,7 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 	}
 
 	newNode := node.NewNode(req.NodeName, req.ClientAddr, req.AgentToken, "worker")
-	newNode.Labels = req.Labels
+	newNode.SetLabels(req.Labels)
 
 	if err := newNode.VerifyToken(ctx); err != nil {
 		s.log.Error().Err(err).Msgf("could not verify agent token")
@@ -219,7 +219,7 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 	if idx >= 0 {
 		workerNode := s.workerNodes[idx]
 		workerNode.Update(req.ClientAddr, req.AgentToken, req.Labels)
-		workerNode.Status = node.StatusReady
+		workerNode.SetStatus(node.StatusReady)
 
 		l.Info().Msgf("on register: updated node %s %s", req.NodeName, req.ClientAddr)
 
@@ -277,7 +277,7 @@ func (s *Service) Deregister(ctx context.Context, req DeregisterRequest) error {
 
 	for _, workerNode := range s.workerNodes {
 		if workerNode.Name == req.NodeName {
-			workerNode.Status = node.StatusRemoved
+			workerNode.SetStatus(node.StatusRemoved)
 			return nil
 		}
 	}
@@ -315,8 +315,8 @@ func (s *Service) healthChecks(ctx context.Context) error {
 	workerNodes := s.GetNodes()
 
 	for _, n := range workerNodes {
-		if n.Status == node.StatusRemoved {
-			s.log.Trace().Msgf("healthcheck: %s Status: %s ignored", n.Name, n.Status)
+		if n.Status() == node.StatusRemoved {
+			s.log.Trace().Msgf("healthcheck: %s Status: %s ignored", n.Name, node.StatusRemoved)
 			continue
 		}
 
@@ -326,16 +326,16 @@ func (s *Service) healthChecks(ctx context.Context) error {
 			if err := n.HealthCheck(ctx); err != nil {
 				log.Error().Err(err).Msgf("agent healthcheck failed: %s", n.Name)
 
-				n.Status = node.StatusUnknown
+				n.SetHealth(node.StatusUnknown)
 
-				log.Warn().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
+				log.Warn().Msgf("healthcheck: %s Status: %s", n.Name, n.Status())
 
 				return err
 			}
 
-			n.Status = node.StatusReady
+			n.SetHealth(node.StatusReady)
 
-			log.Trace().Msgf("healthcheck: %s Status: %s", n.Name, n.Status)
+			log.Trace().Msgf("healthcheck: %s Status: %s", n.Name, n.Status())
 
 			return nil
 		})

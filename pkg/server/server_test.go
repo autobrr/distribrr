@@ -116,8 +116,8 @@ func TestService_OnRegister_newNode(t *testing.T) {
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
 	assert.Equal(t, "node1", nodes[0].Name)
-	assert.Equal(t, agentSrv.URL, nodes[0].Addr)
-	assert.Equal(t, map[string]string{"region": "eu"}, nodes[0].Labels)
+	assert.Equal(t, agentSrv.URL, nodes[0].Addr())
+	assert.Equal(t, map[string]string{"region": "eu"}, nodes[0].Labels())
 
 	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token"}}, s.cfg.Nodes)
 	assert.Equal(t, s.cfg.Nodes, readConfigNodes(t, configFile))
@@ -141,7 +141,7 @@ func TestService_OnRegister_updatesExistingNode(t *testing.T) {
 	s := newTestService(t, configFile)
 
 	require.NoError(t, s.OnRegister(t.Context(), registerRequest("node1", oldAgent.URL, "old-token")))
-	s.GetNodes()[0].Status = node.StatusUnknown
+	s.GetNodes()[0].SetStatus(node.StatusUnknown)
 
 	req := registerRequest("node1", newAgent.URL, "new-token")
 	req.Labels = map[string]string{"region": "us"}
@@ -149,10 +149,10 @@ func TestService_OnRegister_updatesExistingNode(t *testing.T) {
 
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
-	assert.Equal(t, newAgent.URL, nodes[0].Addr)
-	assert.Equal(t, "new-token", nodes[0].Token)
-	assert.Equal(t, map[string]string{"region": "us"}, nodes[0].Labels)
-	assert.Equal(t, node.Status(node.StatusReady), nodes[0].Status)
+	assert.Equal(t, newAgent.URL, nodes[0].Addr())
+	assert.Equal(t, "new-token", nodes[0].Token())
+	assert.Equal(t, map[string]string{"region": "us"}, nodes[0].Labels())
+	assert.Equal(t, node.Status(node.StatusReady), nodes[0].Status())
 
 	// the rebuilt agent client talks to the new agent with the new token
 	require.NoError(t, nodes[0].VerifyToken(t.Context()))
@@ -169,13 +169,13 @@ func TestService_OnRegister_removedNode(t *testing.T) {
 
 	require.NoError(t, s.OnRegister(t.Context(), registerRequest("node1", agentSrv.URL, "agent-token")))
 	require.NoError(t, s.Deregister(t.Context(), DeregisterRequest{NodeName: "node1"}))
-	require.Equal(t, node.Status(node.StatusRemoved), s.GetNodes()[0].Status)
+	require.Equal(t, node.Status(node.StatusRemoved), s.GetNodes()[0].Status())
 
 	require.NoError(t, s.OnRegister(t.Context(), registerRequest("node1", agentSrv.URL, "agent-token")))
 
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
-	assert.Equal(t, node.Status(node.StatusReady), nodes[0].Status)
+	assert.Equal(t, node.Status(node.StatusReady), nodes[0].Status())
 	assert.Len(t, s.cfg.Nodes, 1)
 	assert.Len(t, readConfigNodes(t, configFile), 1)
 }
@@ -202,8 +202,8 @@ func TestService_OnRegister_writeErrorOnUpdate(t *testing.T) {
 
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
-	assert.Equal(t, oldAgent.URL, nodes[0].Addr)
-	assert.Equal(t, "old-token", nodes[0].Token)
+	assert.Equal(t, oldAgent.URL, nodes[0].Addr())
+	assert.Equal(t, "old-token", nodes[0].Token())
 	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: oldAgent.URL, Token: "old-token"}}, s.cfg.Nodes)
 }
 
@@ -217,7 +217,7 @@ func TestService_Deregister(t *testing.T) {
 
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
-	assert.Equal(t, node.Status(node.StatusRemoved), nodes[0].Status)
+	assert.Equal(t, node.Status(node.StatusRemoved), nodes[0].Status())
 	assert.Equal(t, []*AgentNode{{Name: "node1", Addr: agentSrv.URL, Token: "agent-token"}}, readConfigNodes(t, configFile))
 
 	err := s.Deregister(t.Context(), DeregisterRequest{NodeName: "unknown"})
@@ -319,10 +319,10 @@ nodes:
 	}
 
 	before := byName()
-	before["keep"].Status = node.StatusReady
-	before["change"].Status = node.StatusReady
-	before["change"].Labels = map[string]string{"region": "eu"}
-	before["removed"].Status = node.StatusRemoved
+	before["keep"].SetStatus(node.StatusReady)
+	before["change"].SetStatus(node.StatusReady)
+	before["change"].SetLabels(map[string]string{"region": "eu"})
+	before["removed"].SetStatus(node.StatusRemoved)
 
 	writeConfig(t, configFile, `
 http:
@@ -348,21 +348,21 @@ nodes:
 	require.Len(t, after, 5)
 
 	assert.Same(t, before["keep"], after["keep"])
-	assert.Equal(t, node.Status(node.StatusReady), after["keep"].Status)
+	assert.Equal(t, node.Status(node.StatusReady), after["keep"].Status())
 
 	assert.Same(t, before["change"], after["change"])
-	assert.Equal(t, "http://changed:7430", after["change"].Addr)
-	assert.Equal(t, "new-token", after["change"].Token)
-	assert.Equal(t, map[string]string{"region": "eu"}, after["change"].Labels)
-	assert.Equal(t, node.Status(node.StatusReady), after["change"].Status)
+	assert.Equal(t, "http://changed:7430", after["change"].Addr())
+	assert.Equal(t, "new-token", after["change"].Token())
+	assert.Equal(t, map[string]string{"region": "eu"}, after["change"].Labels())
+	assert.Equal(t, node.Status(node.StatusReady), after["change"].Status())
 
-	assert.Equal(t, node.Status(node.StatusRemoved), after["drop"].Status)
+	assert.Equal(t, node.Status(node.StatusRemoved), after["drop"].Status())
 
-	assert.Equal(t, "http://removed-new:7430", after["removed"].Addr)
-	assert.Equal(t, node.Status(node.StatusRemoved), after["removed"].Status)
+	assert.Equal(t, "http://removed-new:7430", after["removed"].Addr())
+	assert.Equal(t, node.Status(node.StatusRemoved), after["removed"].Status())
 
-	assert.Equal(t, "http://new:7430", after["new"].Addr)
-	assert.Equal(t, node.Status(node.StatusNotReady), after["new"].Status)
+	assert.Equal(t, "http://new:7430", after["new"].Addr())
+	assert.Equal(t, node.Status(node.StatusNotReady), after["new"].Status())
 
 	assert.Equal(t, []*AgentNode{
 		{Name: "keep", Addr: "http://keep:7430", Token: "keep-token"},
@@ -397,7 +397,7 @@ nodes:
 	nodes := s.GetNodes()
 	require.Len(t, nodes, 1)
 	assert.Equal(t, "node1", nodes[0].Name)
-	assert.Equal(t, node.Status(node.StatusNotReady), nodes[0].Status)
+	assert.Equal(t, node.Status(node.StatusNotReady), nodes[0].Status())
 	assert.Equal(t, want, s.cfg.Nodes)
 }
 
