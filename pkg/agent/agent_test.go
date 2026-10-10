@@ -10,11 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/autobrr/distribrr/pkg/server/client"
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
@@ -329,4 +331,269 @@ func TestAPIServer_tasks_insufficientStorage(t *testing.T) {
 
 	assert.Equal(t, http.StatusInsufficientStorage, rec.Code)
 	assert.Contains(t, rec.Body.String(), "no client has room for 1.0 GB")
+}
+
+// newReloadService writes content as the agent config file and returns a
+// service built from it, the way cmd/agent.go does.
+func newReloadService(t *testing.T, content string) (*Service, string) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, path, content)
+
+	cfg := NewConfig()
+	require.NoError(t, cfg.LoadFromFile(path))
+	require.NoError(t, cfg.Validate())
+
+	return NewService(cfg), path
+}
+
+func clientConfig(name string, extra string) string {
+	return `
+http:
+  token: secret
+clients:
+  ` + name + `:
+    host: http://127.0.0.1:1
+` + extra
+}
+
+func TestService_reload_swapsClients(t *testing.T) {
+	s, path := newReloadService(t, clientConfig("a", ""))
+	require.Contains(t, s.getClients(), "a")
+
+	writeFile(t, path, clientConfig("b", `
+    rules:
+      torrents:
+        maxActiveDownloads: 5
+`))
+	require.NoError(t, s.reload(t.Context()))
+
+	clients := s.getClients()
+	require.Len(t, clients, 1)
+	require.Contains(t, clients, "b")
+	assert.Equal(t, "b", clients["b"].Name)
+	assert.NotNil(t, clients["b"].Client)
+	assert.Equal(t, 5, clients["b"].Rules.Torrents.MaxActiveDownloads)
+	assert.Contains(t, s.config().Clients, "b")
+}
+
+func TestService_reload_invalidKeepsConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(t *testing.T, path string)
+	}{
+		{name: "unparsable yaml", write: func(t *testing.T, path string) { writeFile(t, path, "clients: [unclosed") }},
+		{name: "fails validation", write: func(t *testing.T, path string) {
+			writeFile(t, path, "http:\n  token: secret\nclients:\n  b:\n    user: admin\n")
+		}},
+		{name: "file removed", write: func(t *testing.T, path string) { require.NoError(t, os.Remove(path)) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, path := newReloadService(t, clientConfig("a", ""))
+			cfg, clients := s.config(), s.getClients()
+
+			tt.write(t, path)
+			assert.Error(t, s.reload(t.Context()))
+
+			assert.Same(t, cfg, s.config())
+			assert.Equal(t, clients, s.getClients())
+		})
+	}
+}
+
+func TestService_reload_withoutConfigFile(t *testing.T) {
+	s := NewService(NewConfig())
+	assert.Error(t, s.reload(t.Context()))
+}
+
+func TestService_reload_keepsHttp(t *testing.T) {
+	s, path := newReloadService(t, `
+http:
+  host: 127.0.0.1
+  port: 7430
+  token: secret
+agent:
+  labels:
+    disktype: hdd
+`)
+
+	writeFile(t, path, `
+http:
+  host: 0.0.0.0
+  port: 9999
+  token: other
+agent:
+  labels:
+    disktype: ssd
+`)
+	require.NoError(t, s.reload(t.Context()))
+
+	assert.Equal(t, Http{Host: "127.0.0.1", Port: "7430", Token: "secret"}, s.config().Http)
+	// the rest of the file still applies
+	assert.Equal(t, map[string]string{"disktype": "ssd"}, s.GetLabels())
+}
+
+func TestService_reload_restartsDirUsage(t *testing.T) {
+	dirA, dirB := t.TempDir(), t.TempDir()
+
+	storage := func(dir string) string {
+		return `
+    rules:
+      storage:
+        - path: ` + dir + `
+          maxUsage: 1TB
+`
+	}
+
+	s, path := newReloadService(t, clientConfig("a", storage(dirA)))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	s.reloadM.Lock()
+	s.watchDirUsage(ctx, s.dirUsagePaths())
+	s.reloadM.Unlock()
+
+	writeFile(t, path, clientConfig("a", storage(dirB)))
+	require.NoError(t, s.reload(ctx))
+
+	assert.Equal(t, []string{dirB}, s.dirUsageWatching)
+	require.Eventually(t, func() bool {
+		_, err := s.dirUsage.get(dirB)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestService_reload_concurrentReads runs request-path readers while the config
+// is reloaded. Run with -race.
+func TestService_reload_concurrentReads(t *testing.T) {
+	s, path := newReloadService(t, clientConfig("a", ""))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				clients, err := s.clientsWithRoom(ctx, 0)
+				assert.NoError(t, err)
+				for _, c := range clients {
+					_ = c.Rules.Torrents.MaxActiveDownloads
+				}
+				_ = s.GetLabels()
+				_ = s.dirUsagePaths()
+			}
+		})
+	}
+
+	for i := range 50 {
+		writeFile(t, path, clientConfig("c"+strconv.Itoa(i), ""))
+		require.NoError(t, s.reload(ctx))
+	}
+
+	cancel()
+	wg.Wait()
+
+	assert.Contains(t, s.getClients(), "c49")
+}
+
+// fakeManager records the join and deregister requests an agent sends.
+type fakeManager struct {
+	*httptest.Server
+
+	m           sync.Mutex
+	joins       []serverclient.JoinRequest
+	deregisters []serverclient.DeregisterRequest
+}
+
+func newFakeManager(t *testing.T) *fakeManager {
+	t.Helper()
+
+	f := &fakeManager{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.m.Lock()
+		defer f.m.Unlock()
+
+		switch r.URL.Path {
+		case "/api/v1/node/register":
+			var req serverclient.JoinRequest
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			f.joins = append(f.joins, req)
+			w.WriteHeader(http.StatusCreated)
+		case "/api/v1/node/deregister":
+			var req serverclient.DeregisterRequest
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			f.deregisters = append(f.deregisters, req)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(f.Close)
+
+	return f
+}
+
+func (f *fakeManager) requests() ([]serverclient.JoinRequest, []serverclient.DeregisterRequest) {
+	f.m.Lock()
+	defer f.m.Unlock()
+
+	return slices.Clone(f.joins), slices.Clone(f.deregisters)
+}
+
+func TestService_reload_rejoins(t *testing.T) {
+	manager := newFakeManager(t)
+
+	agentConfig := func(nodeName, disktype string) string {
+		return `
+http:
+  token: secret
+agent:
+  nodeName: ` + nodeName + `
+  clientAddr: http://agent:7430
+  labels:
+    disktype: ` + disktype + `
+manager:
+  addr: ` + manager.URL + `
+  token: secret
+`
+	}
+
+	s, path := newReloadService(t, agentConfig("node1", "hdd"))
+	require.NoError(t, s.registerAgentWithServer(t.Context(), time.Second))
+
+	// changed labels: join again under the same name
+	writeFile(t, path, agentConfig("node1", "ssd"))
+	require.NoError(t, s.reload(t.Context()))
+
+	require.Eventually(t, s.joined, 5*time.Second, 10*time.Millisecond)
+	joins, deregisters := manager.requests()
+	require.Len(t, joins, 2)
+	assert.Equal(t, map[string]string{"disktype": "ssd"}, joins[1].Labels)
+	assert.Empty(t, deregisters)
+
+	// renamed node: drop the old registration, then join under the new name
+	writeFile(t, path, agentConfig("node2", "ssd"))
+	require.NoError(t, s.reload(t.Context()))
+
+	require.Eventually(t, s.joined, 5*time.Second, 10*time.Millisecond)
+	joins, deregisters = manager.requests()
+	require.Len(t, joins, 3)
+	assert.Equal(t, "node2", joins[2].NodeName)
+	require.Len(t, deregisters, 1)
+	assert.Equal(t, "node1", deregisters[0].NodeName)
+
+	// clients only: no new join
+	writeFile(t, path, agentConfig("node2", "ssd")+`
+clients:
+  a:
+    host: http://127.0.0.1:1
+`)
+	require.NoError(t, s.reload(t.Context()))
+	joins, _ = manager.requests()
+	assert.Len(t, joins, 3)
 }

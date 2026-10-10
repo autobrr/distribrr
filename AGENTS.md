@@ -47,11 +47,19 @@ Go version comes from `go.mod` (1.26). Run with `distribrr server run --config-f
 ### Dual-role binary
 `cmd/server.go` and `cmd/agent.go` build a `Config`, load YAML, and call `Service.Run()` in `pkg/server` or `pkg/agent`. Both serve a chi router from their `api.go` and block on signals.
 
+SIGINT/SIGQUIT/SIGTERM shut down gracefully (the agent deregisters first). SIGHUP reloads the config file: the server
+applies `nodes`, the agent applies `clients`, `agent` and `manager` (re-joining when those change). `http` needs a
+restart on both; a bad file is logged and the old config kept.
+
 ### Server (manager): `pkg/server`, default port 7422
 - autobrr posts to `POST /api/v1/tasks?apikey=TOKEN`. The body is a bare `task.Task` (see README for the webhook payload).
 - `SendWork` -> `selectWorkers` -> `node.StartTask` on each chosen agent concurrently. Best-effort: the task counts as scheduled if at least one agent accepts it. Otherwise autobrr gets 502 with a per-node rejection summary (`summarizeRejections`).
-- Agents self-register at `POST /api/v1/node/register`. `OnRegister` verifies the agent's token by calling back to it, then **appends the node to the server's own config file** (`Config.WriteToFile`). The server config is mutable state, not just input.
-- Deregister only flips the node to `REMOVED`; it stays in memory and in the config file.
+- Agents self-register at `POST /api/v1/node/register`. `OnRegister` verifies the agent's token by calling back to it,
+  then **saves the node to the server's own config file** before updating memory. The server config is mutable state,
+  not just input.
+- Nodes are identified by name: re-registering updates the existing node's addr, token and labels (and revives a
+  `REMOVED` node) instead of adding a duplicate.
+- Deregister flips the node to `REMOVED` on purpose; it stays in memory and in the config file. Unknown names give 404.
 - `HealthChecks` pings every non-removed agent every 10s and sets `READY` / `UNKNOWN`.
 
 ### Agent (worker): `pkg/agent`, default port 7430

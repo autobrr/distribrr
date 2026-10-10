@@ -108,7 +108,8 @@ func (s *APIServer) Handler() http.Handler {
 					req := RegisterRequest{}
 
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-						render.Status(r, http.StatusInternalServerError)
+						render.Status(r, http.StatusBadRequest)
+						render.JSON(w, r, map[string]string{"error": "could not decode request body"})
 						return
 					}
 
@@ -118,6 +119,7 @@ func (s *APIServer) Handler() http.Handler {
 
 					if err := s.service.OnRegister(r.Context(), req); err != nil {
 						render.Status(r, http.StatusInternalServerError)
+						render.JSON(w, r, map[string]string{"error": err.Error()})
 						return
 					}
 
@@ -129,12 +131,18 @@ func (s *APIServer) Handler() http.Handler {
 					req := DeregisterRequest{}
 
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-						render.Status(r, http.StatusInternalServerError)
+						render.Status(r, http.StatusBadRequest)
+						render.JSON(w, r, map[string]string{"error": "could not decode request body"})
 						return
 					}
 
 					if err := s.service.Deregister(r.Context(), req); err != nil {
-						render.Status(r, http.StatusInternalServerError)
+						status := http.StatusInternalServerError
+						if errors.Is(err, ErrNodeNotFound) {
+							status = http.StatusNotFound
+						}
+						render.Status(r, status)
+						render.JSON(w, r, map[string]string{"error": err.Error()})
 						return
 					}
 

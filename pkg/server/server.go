@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"slices"
 	"strings"
@@ -53,8 +54,13 @@ func NewService(cfg *Config) *Service {
 }
 
 func (s *Service) Run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP reloads the config instead of shutting down
+	reload := make(chan os.Signal, 1)
+	signal.Notify(reload, syscall.SIGHUP)
+	defer signal.Stop(reload)
 
 	srv := NewAPIServer(s.cfg, s)
 
@@ -65,11 +71,19 @@ func (s *Service) Run() error {
 
 	go s.HealthChecks(ctx)
 
-	select {
-	case err := <-errorChannel:
-		return errors.Wrap(err, "http server stopped")
-	case <-ctx.Done():
-		log.Info().Msg("got signal, shutting down server")
+	for running := true; running; {
+		select {
+		case err := <-errorChannel:
+			return errors.Wrap(err, "http server stopped")
+		case <-reload:
+			log.Info().Msg("got SIGHUP, reloading config")
+			if err := s.Reload(); err != nil {
+				log.Error().Err(err).Msg("could not reload config, keeping current config")
+			}
+		case <-ctx.Done():
+			log.Info().Msg("got signal, shutting down server")
+			running = false
+		}
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -82,6 +96,95 @@ func (s *Service) Run() error {
 	return nil
 }
 
+// Reload reads the config file again and applies the nodes in it. Nodes new
+// to the file are added, nodes whose addr or token changed are updated and
+// nodes no longer in the file are marked REMOVED. Statuses are otherwise left
+// to the health checks, and a REMOVED node stays REMOVED until it registers.
+// The http settings need a restart and are not applied. On error the running
+// config is left unchanged.
+func (s *Service) Reload() error {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	if s.cfg.configFile == "" {
+		s.log.Info().Msg("reload: no config file set, nothing to reload")
+		return nil
+	}
+
+	// start from the running http values, so keys missing from the file
+	// (set by flags) do not read as changes
+	next := NewConfig()
+	next.Http = s.cfg.Http
+
+	if err := next.LoadFromFile(s.cfg.configFile); err != nil {
+		return errors.Wrap(err, "could not load config")
+	}
+
+	if next.Http != s.cfg.Http {
+		s.log.Warn().Msg("reload: http settings changed, restart required to apply them; keeping current http settings")
+		next.Http = s.cfg.Http
+	}
+
+	var added, updated, removed int
+
+	inFile := make(map[string]struct{}, len(next.Nodes))
+	for _, entry := range next.Nodes {
+		if entry == nil {
+			continue
+		}
+
+		if _, ok := inFile[entry.Name]; ok {
+			s.log.Warn().Msgf("reload: duplicate node %s in config, ignoring", entry.Name)
+			continue
+		}
+		inFile[entry.Name] = struct{}{}
+
+		idx := slices.IndexFunc(s.workerNodes, func(n *node.Node) bool {
+			return n.Name == entry.Name
+		})
+
+		if idx < 0 {
+			s.workerNodes = append(s.workerNodes, node.NewNode(entry.Name, entry.Addr, entry.Token, "worker"))
+			added++
+
+			s.log.Debug().Msgf("reload: added node %s %s", entry.Name, entry.Addr)
+
+			continue
+		}
+
+		workerNode := s.workerNodes[idx]
+		if workerNode.Addr != entry.Addr || workerNode.Token != entry.Token {
+			workerNode.Update(entry.Addr, entry.Token, workerNode.Labels)
+			updated++
+
+			s.log.Debug().Msgf("reload: updated node %s %s", entry.Name, entry.Addr)
+		}
+	}
+
+	for _, workerNode := range s.workerNodes {
+		if _, ok := inFile[workerNode.Name]; ok || workerNode.Status == node.StatusRemoved {
+			continue
+		}
+
+		workerNode.Status = node.StatusRemoved
+		removed++
+
+		s.log.Debug().Msgf("reload: removed node %s", workerNode.Name)
+	}
+
+	s.cfg.Nodes = next.Nodes
+
+	s.log.Info().Msgf("reloaded config: %d nodes added, %d updated, %d removed", added, updated, removed)
+
+	return nil
+}
+
+// ErrNodeNotFound is returned when a request names a node the server does not know.
+var ErrNodeNotFound = errors.New("node not found")
+
+// OnRegister adds a node, or refreshes the address, token and labels of the
+// node with the same name. Node names are unique; a re-register never adds a
+// duplicate, and also brings a REMOVED node back.
 func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 	l := log.Ctx(ctx)
 
@@ -100,101 +203,86 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 		return err
 	}
 
-	// check s.workerNodes if it includes item by req.NodeName
-	exists := slices.ContainsFunc(s.workerNodes, func(n *node.Node) bool {
-		return n.Name == req.NodeName && n.Addr == req.ClientAddr
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	idx := slices.IndexFunc(s.workerNodes, func(n *node.Node) bool {
+		return n.Name == req.NodeName
 	})
 
-	if exists {
-		l.Debug().Msgf("node already exists in config: %s", req.NodeName)
+	// persist first so memory never holds a node the config file does not
+	if err := s.saveNodeToConfig(req.NodeName, req.ClientAddr, req.AgentToken); err != nil {
+		l.Error().Err(err).Msgf("could not write node to config")
+		return err
+	}
 
-		for _, workerNode := range s.workerNodes {
-			if workerNode.Name == req.NodeName {
-				// update labels
-				workerNode.Labels = req.Labels
-				workerNode.Status = node.StatusReady
-			}
-		}
+	if idx >= 0 {
+		workerNode := s.workerNodes[idx]
+		workerNode.Update(req.ClientAddr, req.AgentToken, req.Labels)
+		workerNode.Status = node.StatusReady
+
+		l.Info().Msgf("on register: updated node %s %s", req.NodeName, req.ClientAddr)
 
 		return nil
 	}
 
 	s.workerNodes = append(s.workerNodes, newNode)
 
-	if err := s.appendNodeToConfig(ctx, req.NodeName, req.ClientAddr, req.AgentToken); err != nil {
-		l.Error().Err(err).Msgf("could not write node to config")
-		return err
-	}
-
 	l.Info().Msgf("on register: new node %s %s", req.NodeName, req.ClientAddr)
 
 	return nil
 }
 
-func (s *Service) appendNodeToConfig(_ context.Context, nodeName string, clientAddr string, token string) error {
-	log.Debug().Msgf("append node to config: %s %s", nodeName, clientAddr)
+// saveNodeToConfig adds or updates the config entry for nodeName and writes
+// the config file. Nothing is written when the entry is already up to date.
+// s.cfg.Nodes is only changed after a successful write. Callers hold s.m.
+func (s *Service) saveNodeToConfig(nodeName string, clientAddr string, token string) error {
+	idx := slices.IndexFunc(s.cfg.Nodes, func(n *AgentNode) bool {
+		return n != nil && n.Name == nodeName
+	})
 
-	a := AgentNode{
+	if idx >= 0 && s.cfg.Nodes[idx].Addr == clientAddr && s.cfg.Nodes[idx].Token == token {
+		return nil
+	}
+
+	log.Debug().Msgf("save node to config: %s %s", nodeName, clientAddr)
+
+	entry := &AgentNode{
 		Name:  nodeName,
 		Addr:  clientAddr,
 		Token: token,
 	}
 
-	s.cfg.Nodes = append(s.cfg.Nodes, &a)
+	nodes := slices.Clone(s.cfg.Nodes)
+	if idx >= 0 {
+		nodes[idx] = entry
+	} else {
+		nodes = append(nodes, entry)
+	}
 
-	if err := s.cfg.WriteToFile(); err != nil {
-		log.Error().Err(err).Msgf("could not write node to config")
-		return errors.Wrap(err, "could not write node to config")
+	if err := s.cfg.writeNodesToFile(nodes); err != nil {
+		return errors.Wrapf(err, "could not write node to config: %s", nodeName)
 	}
 
 	return nil
 }
 
+// Deregister marks the node REMOVED. It stays in memory and in the config
+// file, and becomes active again when the agent registers.
 func (s *Service) Deregister(ctx context.Context, req DeregisterRequest) error {
 	log.Info().Msgf("deregister: node %s", req.NodeName)
 
+	s.m.Lock()
+	defer s.m.Unlock()
+
 	for _, workerNode := range s.workerNodes {
 		if workerNode.Name == req.NodeName {
-			//s.workerNodes = append(s.workerNodes[:i], s.workerNodes[i+1:]...)
 			workerNode.Status = node.StatusRemoved
-			break
+			return nil
 		}
 	}
 
-	//slices.DeleteFunc(s.workerNodes, func(node *node.Node) bool {
-	//	return node.Name == req.NodeName
-	//})
-
-	//if err := s.removeNodeFromConfig(ctx, req.NodeName); err != nil {
-	//	return err
-	//}
-
-	return nil
-}
-
-func (s *Service) removeNodeFromConfig(ctx context.Context, nodeName string) error {
-	log.Debug().Msgf("remove node from config: node %s", nodeName)
-
-	// remove from config slice
-	s.cfg.Nodes = slices.DeleteFunc(s.cfg.Nodes, func(agentNode *AgentNode) bool {
-		return agentNode.Name == nodeName
-	})
-
-	l := log.Ctx(ctx)
-
-	if len(s.cfg.Nodes) == 0 {
-		s.cfg.Nodes = []*AgentNode{}
-	}
-
-	// remove from config file
-	if err := s.cfg.WriteToFile(); err != nil {
-		l.Error().Err(err).Msgf("could not write node to config")
-		return err
-	}
-
-	log.Info().Msgf("deregister: node %s", nodeName)
-
-	return nil
+	return errors.Wrapf(ErrNodeNotFound, "could not deregister node: %s", req.NodeName)
 }
 
 func (s *Service) GetNodes() []*node.Node {
@@ -354,7 +442,7 @@ func (s *Service) selectWorkers(ctx context.Context, t task.Task) ([]*node.Node,
 	var sc scheduler.LeastActive
 
 	// select candidates
-	candidates, rejected := sc.SelectCandidateNodes(ctx, t, s.workerNodes)
+	candidates, rejected := sc.SelectCandidateNodes(ctx, t, s.GetNodes())
 	if len(candidates) == 0 {
 		return nil, rejected, nil
 	}

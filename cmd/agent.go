@@ -43,8 +43,8 @@ func CommandAgentRun() *cobra.Command {
 			return errors.Wrapf(err, "could not load config from file: %s", configPath)
 		}
 
-		if cfg.Http.Token == "" {
-			return errors.New("http.token must be set; refusing to start without an API token")
+		if err := cfg.Validate(); err != nil {
+			return errors.Wrap(err, "invalid config")
 		}
 
 		app := agent.NewService(cfg)

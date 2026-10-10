@@ -49,6 +49,16 @@ func NewNode(name string, clientAddr string, token string, role string) *Node {
 	}
 }
 
+// Update points the node at a new address and token and replaces its labels.
+// The agent client is bound to addr and token, so it is rebuilt.
+// Status is left untouched; callers decide whether the node is ready.
+func (n *Node) Update(addr string, token string, labels map[string]string) {
+	n.Addr = addr
+	n.Token = token
+	n.Labels = labels
+	n.client = agent.NewClient(addr, n.Name, token)
+}
+
 func (n *Node) StartTask(ctx context.Context, te *task.Event) error {
 	err := n.client.StartTask(ctx, te)
 	if err != nil {
