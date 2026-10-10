@@ -10,7 +10,6 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog/log"
 )
 
 var k = koanf.New(".")
@@ -65,16 +64,16 @@ func (c *Config) Defaults() {
 func (c *Config) LoadFromFile(configPath string) error {
 	if configPath != "" {
 		if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-			log.Fatal().Err(err).Str("service", "config").Msgf("config file does not exist: %q", configPath)
+			return errors.Wrapf(err, "config file does not exist: %s", configPath)
 		}
 
 		if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
-			log.Fatal().Err(err).Str("service", "config").Msgf("failed parsing %q", configPath)
+			return errors.Wrapf(err, "could not parse config file: %s", configPath)
 		}
 
 		// unmarshal
 		if err := k.Unmarshal("", &c); err != nil {
-			log.Fatal().Err(err).Str("service", "config").Msgf("failed unmarshalling %q", configPath)
+			return errors.Wrapf(err, "could not unmarshal config file: %s", configPath)
 		}
 	}
 	return nil

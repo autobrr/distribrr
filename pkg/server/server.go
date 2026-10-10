@@ -50,24 +50,28 @@ func NewService(cfg *Config) *Service {
 	return s
 }
 
-func (s *Service) Run() {
+func (s *Service) Run() error {
 	srv := NewAPIServer(s.cfg, s)
 
-	errorChannel := make(chan error)
+	errorChannel := make(chan error, 1)
 	go func() {
 		errorChannel <- srv.Open()
 	}()
 
-	//go s.HealthChecks()
 	go s.HealthChecks()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
 
-	for sig := range sigCh {
+	select {
+	case err := <-errorChannel:
+		return errors.Wrap(err, "http server stopped")
+	case sig := <-sigCh:
 		log.Info().Msgf("got signal %q, shutting down server", sig)
 		os.Exit(0)
 	}
+
+	return nil
 }
 
 func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
@@ -164,7 +168,7 @@ func (s *Service) removeNodeFromConfig(ctx context.Context, nodeName string) err
 	log.Debug().Msgf("remove node from config: node %s", nodeName)
 
 	// remove from config slice
-	slices.DeleteFunc(s.cfg.Nodes, func(agentNode *AgentNode) bool {
+	s.cfg.Nodes = slices.DeleteFunc(s.cfg.Nodes, func(agentNode *AgentNode) bool {
 		return agentNode.Name == nodeName
 	})
 

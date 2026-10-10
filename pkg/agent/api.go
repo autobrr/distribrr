@@ -37,8 +37,7 @@ func (s *APIServer) Open() error {
 
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Error().Err(err).Msgf("could not open listener on: %s", addr)
-		//return errors.Wrap(err, "error opening http server")
+		return errors.Wrapf(err, "could not open listener on: %s", addr)
 	}
 
 	server := http.Server{
