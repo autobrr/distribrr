@@ -11,44 +11,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type ClientStatsReader interface {
-	GetActiveDownloads() int
-}
-
-type ClientTorrent struct {
-	AddedOn           int64   `json:"added_on"`
-	AmountLeft        int64   `json:"amount_left"`
-	Category          string  `json:"category"`
-	Completed         int64   `json:"completed"`
-	CompletionOn      int64   `json:"completion_on"`
-	DlLimit           int64   `json:"dl_limit"`
-	DlSpeed           int64   `json:"dlspeed"`
-	Downloaded        int64   `json:"downloaded"`
-	DownloadedSession int64   `json:"downloaded_session"`
-	ETA               int64   `json:"eta"`
-	Hash              string  `json:"hash"`
-	InfohashV1        string  `json:"infohash_v1"`
-	InfohashV2        string  `json:"infohash_v2"`
-	Name              string  `json:"name"`
-	NumLeechs         int64   `json:"num_leechs"`
-	NumSeeds          int64   `json:"num_seeds"`
-	Priority          int64   `json:"priority"`
-	Progress          float64 `json:"progress"`
-	Ratio             float64 `json:"ratio"`
-	SeedingTime       int64   `json:"seeding_time"`
-	Size              int64   `json:"size"`
-	State             string  `json:"state"`
-	Tags              string  `json:"tags"`
-	TimeActive        int64   `json:"time_active"`
-	TotalSize         int64   `json:"total_size"`
-	Tracker           string  `json:"tracker"`
-	TrackersCount     int64   `json:"trackers_count"`
-	UpLimit           int64   `json:"up_limit"`
-	Uploaded          int64   `json:"uploaded"`
-	UploadedSession   int64   `json:"uploaded_session"`
-	UpSpeed           int64   `json:"upspeed"`
-}
-
 type ClientStatus string
 
 const (
@@ -81,12 +43,6 @@ type ClientStats struct {
 	StorageHeadroom *uint64 `json:"storage_headroom,omitempty"`
 }
 
-// HasAvailableSlot reports whether the client is below its max active
-// downloads. A limit of 0 means unlimited.
-func (c *ClientStats) HasAvailableSlot() bool {
-	return c.MaxActiveDownloadsAllowed == 0 || c.ActiveDownloadsCount < c.MaxActiveDownloadsAllowed
-}
-
 // HasRoomFor reports whether a torrent of size bytes fits within the client's
 // storage rules. An unknown size (0) or a client without storage rules always fits.
 func (c *ClientStats) HasRoomFor(size uint64) bool {
@@ -103,44 +59,8 @@ type Stats struct {
 	DiskPathStats map[string]*linux.Disk `json:"disk_path_stats"`
 	CpuStats      *linux.CPUStat         `json:"cpu_stats"`
 	LoadStats     *linux.LoadAvg         `json:"load_stats"`
-	TaskCount     int                    `json:"task_count"`
 	ClientStats   map[string]ClientStats `json:"client_stats"`
 	// NetworkStats
-}
-
-func (s *Stats) MemUsedKb() uint64 {
-	return s.MemStats.MemTotal - s.MemStats.MemAvailable
-}
-
-func (s *Stats) MemUsedPercent() uint64 {
-	return s.MemStats.MemAvailable / s.MemStats.MemTotal
-}
-
-func (s *Stats) MemAvailableKb() uint64 {
-	return s.MemStats.MemAvailable
-}
-
-func (s *Stats) MemTotalKb() uint64 {
-	return s.MemStats.MemTotal
-}
-
-func (s *Stats) CpuUsage() float64 {
-	idle := s.CpuStats.Idle + s.CpuStats.IOWait
-	nonIdle := s.CpuStats.User + s.CpuStats.Nice + s.CpuStats.System + s.CpuStats.IRQ + s.CpuStats.SoftIRQ + s.CpuStats.Steal
-	total := idle + nonIdle
-
-	if total == 0 && idle == 0 {
-		return 0.00
-	}
-
-	return (float64(total) - float64(idle)) / float64(total)
-}
-
-func (s *Stats) SetClientActiveDownloads(client string, count int) uint64 {
-	s.ClientStats[client] = ClientStats{
-		ActiveDownloadsCount: count,
-	}
-	return uint64(count)
 }
 
 func GetStats() *Stats {
@@ -258,7 +178,6 @@ func GetDirUsage(path string) (uint64, error) {
 func GetCpuStats() *linux.CPUStat {
 	stats, err := linux.ReadStat("/proc/stat")
 	if err != nil {
-		log.Printf("Error reading from /proc/stat")
 		log.Error().Err(err).Msgf("Error reading from: /proc/stat")
 		return &linux.CPUStat{}
 	}

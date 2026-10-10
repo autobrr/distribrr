@@ -225,16 +225,6 @@ func (c *Client) setHeaders(ctx context.Context, req *http.Request) {
 	}
 }
 
-type DownloadRequest struct {
-	DownloadUrl string            `json:"download_url"`
-	Filename    string            `json:"filename"`
-	InfoHash    string            `json:"info_hash"`
-	Category    string            `json:"category"`
-	Tags        string            `json:"tags"`
-	Mode        string            `json:"mode,omitempty"`
-	Opts        map[string]string `json:"opts"`
-}
-
 func (c *Client) buildUrl(addr string, endpoint string, params map[string]string) (*url.URL, error) {
 	apiBase := "/api/v1/"
 

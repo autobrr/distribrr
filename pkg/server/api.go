@@ -14,7 +14,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -170,27 +169,9 @@ func (s *APIServer) Handler() http.Handler {
 					render.Status(r, http.StatusCreated)
 					render.PlainText(w, r, "OK")
 				})
-
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-					if err := getTasksHandler(r.Context()); err != nil {
-						render.Status(r, http.StatusInternalServerError)
-						return
-					}
-
-					render.PlainText(w, r, "get tasks")
-					render.Status(r, http.StatusOK)
-					return
-				})
 			})
 		})
 	})
 
 	return r
-}
-
-func getTasksHandler(ctx context.Context) error {
-	l := zerolog.Ctx(ctx)
-	l.Info().Msg("get tasks")
-
-	return nil
 }

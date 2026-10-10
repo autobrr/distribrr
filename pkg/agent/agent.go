@@ -511,26 +511,6 @@ func (s *Service) Healthcheck(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) GetTasks() {
-	// get tasks
-}
-
-func (s *Service) AddTask(t task.Task) {
-
-}
-
-func (s *Service) RunTasks() {
-	// for queue runTask
-}
-
-func (s *Service) runTask(t task.Task) error {
-	if err := s.StartTask(context.Background(), t); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // StartTask adds the torrent to every ready client with room. It gives up when
 // ctx is done, e.g. the server stopped waiting, or after TaskTimeout.
 func (s *Service) StartTask(ctx context.Context, t task.Task) error {
@@ -679,48 +659,10 @@ func joinReasons(reasons []stats.NotReadyReason) string {
 	return strings.Join(parts, ", ")
 }
 
-func (s *Service) StopTask(t task.Task) {
-
-}
-
-func (s *Service) InspectTask(t task.Task) {
-
-}
-
-func (s *Service) UpdateTasks(t task.Task) {
-	for {
-		s.updateTasks()
-		time.Sleep(15 * time.Second)
-	}
-}
-
-func (s *Service) updateTasks() {
-
-}
-
-func (s *Service) CollectStats() {
-	for {
-		log.Trace().Msg("collecting stats")
-		//s.stats = stats.GetStats()
-		//
-		////for _, client := range s.clients {
-		////	s.stats.GetActiveDownloads(client.Name, stats.ClientStatsReader())
-		////}
-		//s.taskCount = s.stats.TaskCount
-		s.GetStats()
-		time.Sleep(15 * time.Second)
-	}
-}
-
 func (s *Service) GetStatsFull(ctx context.Context) *stats.Stats {
 	st := stats.GetStats()
 	s.collectClientStats(ctx, st)
 	return st
-}
-
-func (s *Service) GetStats() *stats.Stats {
-	log.Trace().Msg("collecting stats")
-	return stats.GetStats()
 }
 
 // collectClientStats fills st with per-client torrent and storage status. It

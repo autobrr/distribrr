@@ -457,27 +457,6 @@ func (s *Service) healthChecks(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) ProcessTasks() {
-	ticker := time.NewTicker(10 * time.Second)
-	done := make(chan bool)
-
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case t := <-ticker.C:
-				fmt.Println("Tick at", t)
-				log.Debug().Msgf("Processing task queue")
-
-				// FIXME change to read from queue
-				s.SendWork(context.Background(), task.NewEvent())
-				log.Debug().Msgf("sleeping for 10 seconds...")
-			}
-		}
-	}()
-}
-
 func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 	ctx, cancel := context.WithTimeout(ctx, s.WebhookTimeout)
 	defer cancel()
@@ -611,12 +590,6 @@ func (s *Service) AddTask(ctx context.Context, te task.Event) error {
 	return s.SendWork(ctx, te)
 }
 
-func (s *Service) QueueTask(ctx context.Context, te task.Event) {
-	// TODO add to queue
-
-	s.SendWork(ctx, te)
-}
-
 type RegisterRequest struct {
 	NodeName    string            `json:"node_name"`
 	RemoteAddr  string            `json:"remote_addr,omitempty"`
@@ -631,26 +604,4 @@ type DeregisterRequest struct {
 	//RemoteAddr string `json:"remote_addr,omitempty"`
 	//ClientAddr string `json:"client_addr"`
 	//AgentToken string `json:"api_key"`
-}
-
-type ScheduleDownloadRequest struct {
-	DownloadUrl  string `json:"download_url"`
-	Filename     string `json:"filename"`
-	InfoHash     string `json:"info_hash"`
-	Category     string `json:"category"`
-	Tags         string `json:"tags"`
-	MaxDownloads int    `json:"max_downloads"`
-	Mode         string `json:"mode"`
-	Opts         map[string]string
-}
-
-type TorrentDownloadRequest struct {
-	DownloadUrl  string            `json:"download_url"`
-	Filename     string            `json:"filename"`
-	InfoHash     string            `json:"info_hash"`
-	Category     string            `json:"category"`
-	Tags         string            `json:"tags"`
-	MaxDownloads int               `json:"max_downloads"`
-	Mode         string            `json:"mode"`
-	Opts         map[string]string `json:"opts"`
 }

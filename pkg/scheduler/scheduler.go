@@ -20,12 +20,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	// LIEB square ice constant
-	// https://en.wikipedia.org/wiki/Lieb%27s_square_ice_constant
-	LIEB = 1.53960071783900203869
-)
-
 // Scheduler types a task can ask for in task.Task.SchedulerType.
 const (
 	TypeLeastActive = "least_active"
