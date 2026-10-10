@@ -38,6 +38,7 @@ const (
 	defaultDirUsageInterval      = time.Minute
 	defaultReannounceInterval    = 7
 	defaultReannounceMaxAttempts = 50
+	defaultTaskTimeout           = 60 * time.Second
 )
 
 type Service struct {
@@ -55,6 +56,10 @@ type Service struct {
 	ReannounceInterval int
 	// ReannounceMaxAttempts is how many times a torrent is re-announced at most.
 	ReannounceMaxAttempts int
+	// TaskTimeout bounds StartTask: checking the clients, fetching the
+	// .torrent and adding it. The server waits longer than this for the
+	// agent's answer, so a slow tracker fails here first.
+	TaskTimeout time.Duration
 
 	// m guards cfg, clients, serverClient, controlNode and serveCtx. reload swaps cfg and
 	// clients for new values instead of changing them in place, so readers can
@@ -88,6 +93,7 @@ func NewService(cfg *Config) *Service {
 		DirUsageInterval:      defaultDirUsageInterval,
 		ReannounceInterval:    defaultReannounceInterval,
 		ReannounceMaxAttempts: defaultReannounceMaxAttempts,
+		TaskTimeout:           defaultTaskTimeout,
 
 		cfg:     cfg,
 		clients: buildClients(cfg),
@@ -518,18 +524,20 @@ func (s *Service) RunTasks() {
 }
 
 func (s *Service) runTask(t task.Task) error {
-	if err := s.StartTask(t); err != nil {
+	if err := s.StartTask(context.Background(), t); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *Service) StartTask(t task.Task) error {
+// StartTask adds the torrent to every ready client with room. It gives up when
+// ctx is done, e.g. the server stopped waiting, or after TaskTimeout.
+func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 	sender := errgroup.Group{}
-	//downloads := 0
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(ctx, s.TaskTimeout)
+	defer cancel()
 
 	opts := map[string]string{}
 

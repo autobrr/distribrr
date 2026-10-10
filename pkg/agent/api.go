@@ -102,7 +102,7 @@ func (s *APIServer) Handler() http.Handler {
 						return
 					}
 
-					if err := s.service.StartTask(te.Task); err != nil {
+					if err := s.service.StartTask(r.Context(), te.Task); err != nil {
 						status := http.StatusInternalServerError
 						switch {
 						case errors.Is(err, ErrInsufficientStorage):

@@ -28,13 +28,25 @@ import (
 // shutdownTimeout bounds how long in-flight requests get to finish on shutdown.
 const shutdownTimeout = 30 * time.Second
 
-// defaultHealthCheckInterval is the default Service.HealthCheckInterval.
-const defaultHealthCheckInterval = 10 * time.Second
+// Defaults for the Service timing fields.
+const (
+	defaultHealthCheckInterval = 10 * time.Second
+	defaultTaskTimeout         = 75 * time.Second
+	defaultWebhookTimeout      = 100 * time.Second
+)
 
 type Service struct {
 	// HealthCheckInterval is how often Serve health checks the nodes. Set it
 	// before calling Serve.
 	HealthCheckInterval time.Duration
+	// TaskTimeout is how long SendWork waits for one agent to accept a task.
+	// It must be longer than the agent's own TaskTimeout, so the agent gives
+	// up and answers first instead of adding the torrent after the server
+	// stopped waiting.
+	TaskTimeout time.Duration
+	// WebhookTimeout bounds a whole SendWork, node selection included. Keep it
+	// below autobrr's webhook timeout (120s).
+	WebhookTimeout time.Duration
 
 	cfg         *Config
 	workerNodes []*node.Node
@@ -46,6 +58,8 @@ type Service struct {
 func NewService(cfg *Config) *Service {
 	s := &Service{
 		HealthCheckInterval: defaultHealthCheckInterval,
+		TaskTimeout:         defaultTaskTimeout,
+		WebhookTimeout:      defaultWebhookTimeout,
 
 		cfg:         cfg,
 		workerNodes: make([]*node.Node, 0),
@@ -452,6 +466,9 @@ func (s *Service) ProcessTasks() {
 }
 
 func (s *Service) SendWork(ctx context.Context, te task.Event) error {
+	ctx, cancel := context.WithTimeout(ctx, s.WebhookTimeout)
+	defer cancel()
+
 	l := logger.GetWithCtx(ctx)
 
 	l.Debug().Msgf("received task: %+v", te.Task)
@@ -486,7 +503,10 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 		fetcher.Go(func() error {
 			subLogger.Debug().Msgf("sending task to: %s", n.Name)
 
-			if err := n.StartTask(ctx, &te); err != nil {
+			taskCtx, cancel := context.WithTimeout(ctx, s.TaskTimeout)
+			defer cancel()
+
+			if err := n.StartTask(taskCtx, &te); err != nil {
 				subLogger.Error().Err(err).Msgf("error could not send task to node: %s", n.Name)
 				return err
 			}

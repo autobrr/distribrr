@@ -75,6 +75,14 @@ func WithHealthCheckInterval(d time.Duration) Option {
 	}
 }
 
+// WithTaskTimeout overrides how long the server waits for one agent to accept
+// a task.
+func WithTaskTimeout(d time.Duration) Option {
+	return func(s *server.Service) {
+		s.TaskTimeout = d
+	}
+}
+
 // New starts a server on a random local port with an empty config file. It is
 // stopped on t.Cleanup, after every agent added later.
 func New(t testing.TB, opts ...Option) *Harness {
@@ -277,6 +285,8 @@ type AgentSpec struct {
 	// Unregistered keeps the agent's link to the server cut from the start,
 	// so it never registers; add it to the server config with ReloadServer.
 	Unregistered bool
+	// TaskTimeout overrides the agent's agent.Service.TaskTimeout when set.
+	TaskTimeout time.Duration
 }
 
 // ClientSpec describes one qBittorrent client of an agent.
@@ -379,6 +389,9 @@ func (a *Agent) start() {
 	svc.DirUsageInterval = dirUsageInterval
 	svc.ReannounceInterval = 1
 	svc.ReannounceMaxAttempts = 2
+	if a.spec.TaskTimeout > 0 {
+		svc.TaskTimeout = a.spec.TaskTimeout
+	}
 
 	a.reload = make(chan struct{})
 	reload := a.reload

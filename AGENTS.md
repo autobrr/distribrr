@@ -87,6 +87,10 @@ restart on both; a bad file is logged and the old config kept.
   `.torrent`. No ready client returns `ErrNoReadyClients` (HTTP 503); no ready client with room returns
   `ErrInsufficientStorage` (HTTP 507).
 - After adding, the agent re-announces in a goroutine.
+- Timeouts nest so the agent answers first: agent `TaskTimeout` (60s, covers the client check, `.torrent` fetch and
+  add) < server `TaskTimeout` (75s per agent) < server `WebhookTimeout` (100s per webhook) < autobrr's webhook timeout
+  (120s). The agent's task ctx is the request ctx, so it stops when the server stops waiting. `.torrent` fetches retry 3
+  times, 1s apart, 20s each.
 
 ### The two HTTP clients (directionality is the confusing part)
 - `pkg/agent/client.go` (package `agent`, type `Client`) is used **by the server to call an agent**. `pkg/node.Node` wraps one; `Node` is the server-side handle for a worker.
