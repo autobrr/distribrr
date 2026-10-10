@@ -27,6 +27,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// shutdownTimeout bounds how long deregistering and in-flight requests get on shutdown.
+const shutdownTimeout = 30 * time.Second
+
 type Service struct {
 	cfg *Config
 
@@ -58,33 +61,41 @@ func NewService(cfg *Config) *Service {
 }
 
 func (s *Service) Run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	defer stop()
+
 	srv := NewAPIServer(s.cfg, s)
 
 	// register agent with server
-	go s.Register()
+	go s.Register(ctx)
 
 	// keep dir usage for maxUsage rules measured in the background
-	go s.dirUsage.run(context.Background(), s.dirUsagePaths(), dirUsageInterval)
+	go s.dirUsage.run(ctx, s.dirUsagePaths(), dirUsageInterval)
 
 	errorChannel := make(chan error, 1)
 	go func() {
 		errorChannel <- srv.Open()
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
-
 	select {
 	case err := <-errorChannel:
 		return errors.Wrap(err, "http server stopped")
-	case sig := <-sigCh:
-		log.Info().Msgf("got signal %q, shutting down server", sig)
+	case <-ctx.Done():
+		log.Info().Msg("got signal, shutting down agent")
+	}
 
-		if err := s.Deregister(); err != nil {
-			os.Exit(1)
-		}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
 
-		os.Exit(0)
+	// deregister first so the server stops sending tasks while in-flight ones finish
+	deregisterErr := s.Deregister(shutdownCtx)
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return errors.Wrap(err, "could not shut down http server")
+	}
+
+	if deregisterErr != nil {
+		return errors.Wrap(deregisterErr, "could not deregister agent")
 	}
 
 	return nil
@@ -108,30 +119,32 @@ func (s *Service) initClients() {
 	}
 }
 
-func (s *Service) Register() {
+func (s *Service) Register(ctx context.Context) {
 	tickerDuration := time.Second * 10
-	if err := s.registerAgentWithServer(tickerDuration); err != nil {
+	if err := s.registerAgentWithServer(ctx, tickerDuration); err != nil {
 		log.Error().Err(err).Msgf("could not register agent and join server: %s", s.cfg.Manager.Addr)
 	}
 
-	ticker := time.NewTicker(tickerDuration) //
+	ticker := time.NewTicker(tickerDuration)
 	defer ticker.Stop()
 
 	for s.controlNode == nil {
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
-			if err := s.registerAgentWithServer(tickerDuration); err != nil {
+			if err := s.registerAgentWithServer(ctx, tickerDuration); err != nil {
 				log.Error().Err(err).Msgf("could not register agent and join server: %s", s.cfg.Manager.Addr)
 			}
 		}
 	}
 }
 
-func (s *Service) registerAgentWithServer(tickerDuration time.Duration) error {
+func (s *Service) registerAgentWithServer(ctx context.Context, tickerDuration time.Duration) error {
 	log.Debug().Msgf("preparing to register agent and join server: %s", s.cfg.Manager.Addr)
 
 	// Create a new context that will be done after tickerDuration
-	ctx, cancel := context.WithTimeout(context.Background(), tickerDuration)
+	ctx, cancel := context.WithTimeout(ctx, tickerDuration)
 	defer cancel()
 	if err := s.Join(ctx, s.cfg.Manager.Addr, s.cfg.Manager.Token, s.cfg.Agent, s.cfg.Http.Token); err != nil {
 		return err
@@ -140,8 +153,11 @@ func (s *Service) registerAgentWithServer(tickerDuration time.Duration) error {
 	return nil
 }
 
-func (s *Service) Deregister() error {
-	ctx := context.Background()
+func (s *Service) Deregister(ctx context.Context) error {
+	// never joined, nothing to deregister
+	if s.controlNode == nil {
+		return nil
+	}
 
 	log.Info().Msgf("deregister node with server")
 
