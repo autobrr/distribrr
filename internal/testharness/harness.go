@@ -88,6 +88,14 @@ func WithTaskTimeout(d time.Duration) Option {
 	}
 }
 
+// WithNodeCheckTimeout overrides how long the server waits for agents'
+// labels and stats, per task and per health check round.
+func WithNodeCheckTimeout(d time.Duration) Option {
+	return func(s *server.Service) {
+		s.NodeCheckTimeout = d
+	}
+}
+
 // New starts a server on a random local port with an empty config file. It is
 // stopped on t.Cleanup, after every agent added later.
 func New(t testing.TB, opts ...Option) *Harness {
@@ -352,6 +360,8 @@ type Agent struct {
 	// the agent cannot deregister.
 	link    *httptest.Server
 	linkCut atomic.Bool
+	// hang withholds every request to the agent while shut.
+	hang *gate
 
 	url    string
 	reload chan struct{}
@@ -375,6 +385,7 @@ func (h *Harness) AddAgent(t testing.TB, spec AgentSpec) *Agent {
 		spec:       spec,
 		token:      spec.Name + "-token",
 		configFile: filepath.Join(t.TempDir(), "config_agent.yaml"),
+		hang:       newGate(),
 	}
 	a.linkCut.Store(spec.Unregistered)
 
@@ -418,6 +429,7 @@ func (a *Agent) start() {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	a.url = "http://" + ln.Addr().String()
+	ln = &hangListener{Listener: ln, gate: a.hang}
 
 	a.writeConfig()
 
@@ -494,6 +506,21 @@ func (a *Agent) Kill() {
 
 	// the failed deregister is the point, so its error is expected
 	_ = a.halt()
+}
+
+// Hang makes the agent stop answering, like a host that went dark: requests
+// to it connect but get no response until Resume. The server's health checks
+// time out instead of failing fast. It resumes on t.Cleanup, before the agent
+// stops.
+func (a *Agent) Hang() {
+	a.hang.shut()
+	a.t.Cleanup(a.Resume)
+}
+
+// Resume drops the requests withheld since Hang, whose callers gave up on
+// them, and answers new ones again.
+func (a *Agent) Resume() {
+	a.hang.open()
 }
 
 func (a *Agent) halt() error {

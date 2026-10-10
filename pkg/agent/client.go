@@ -65,7 +65,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("node: %s healthcheck unexpected status: %d", c.name, resp.StatusCode)
+		return c.statusError(resp)
 	}
 
 	return nil
@@ -96,7 +96,7 @@ func (c *Client) getLabels(ctx context.Context) (map[string]string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+		return nil, c.statusError(resp)
 	}
 
 	var data map[string]string
@@ -132,7 +132,7 @@ func (c *Client) getStats(ctx context.Context) (*stats.Stats, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+		return nil, c.statusError(resp)
 	}
 
 	var s stats.Stats
@@ -168,7 +168,7 @@ func (c *Client) verifyToken(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+		return c.statusError(resp)
 	}
 
 	return nil
@@ -204,11 +204,34 @@ func (c *Client) startTask(ctx context.Context, te *task.Event) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("node: %s unexpected status: %d: %s", c.name, resp.StatusCode, bytes.TrimSpace(respBody))
+		return c.statusError(resp)
 	}
 
 	return nil
+}
+
+// statusError reads the error the agent sent with an unexpected status.
+func (c *Client) statusError(resp *http.Response) error {
+	if msg := errorBody(resp); msg != "" {
+		return fmt.Errorf("node: %s unexpected status: %d: %s", c.name, resp.StatusCode, msg)
+	}
+
+	return fmt.Errorf("node: %s unexpected status: %d", c.name, resp.StatusCode)
+}
+
+// errorBody returns the message of an error response: the "error" field of a
+// JSON body, or else the body itself, capped at 4 KiB.
+func errorBody(resp *http.Response) string {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+	var e struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err == nil && e.Error != "" {
+		return e.Error
+	}
+
+	return string(bytes.TrimSpace(body))
 }
 
 func (c *Client) setHeaders(ctx context.Context, req *http.Request) {

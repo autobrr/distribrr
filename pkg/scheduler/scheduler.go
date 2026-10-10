@@ -50,56 +50,25 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 }
 
 // selectCandidates keeps the nodes that can take the task and records why the
-// others cannot. Every scheduler shares it.
+// others cannot. Every scheduler shares it. Nodes are checked concurrently, so
+// a slow node delays the task by at most ctx's deadline, not once per node.
 func selectCandidates(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection) {
+	reasons := make([][]string, len(nodes))
+
+	var wg sync.WaitGroup
+	for i, n := range nodes {
+		wg.Go(func() {
+			reasons[i] = checkNode(ctx, t, n)
+		})
+	}
+	wg.Wait()
+
 	var candidates []*node.Node
 	var rejected []NodeRejection
 
-	for _, n := range nodes {
-		if status := n.Status(); status != node.StatusReady {
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("node not ready (%s)", status)}})
-			continue
-		}
-
-		// match nodes by labels
-		nodeLabels, err := n.GetLabels(ctx)
-		if err != nil {
-			log.Error().Err(err).Msgf("could not get labels for node %s", n.Name)
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{"could not fetch labels"}})
-			continue
-		}
-
-		if !checkLabels(t.Labels, nodeLabels) {
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{"labels do not match task"}})
-			continue
-		}
-
-		stat, err := n.GetStats(ctx)
-		if err != nil {
-			log.Error().Err(err).Msgf("could not get stats for node %s", n.Name)
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{"could not fetch stats"}})
-			continue
-		}
-
-		// the agent only adds the torrent to its ready clients with room, so
-		// the node needs one such client, not all of them
-		ready := readyClients(stat.ClientStats)
-		if len(ready) == 0 {
-			var clientReasons []string
-			for _, clientStats := range stat.ClientStats {
-				clientReasons = append(clientReasons, fmt.Sprintf("client %s: %s", clientStats.Name, formatReasons(clientStats.Reasons)))
-			}
-			if len(clientReasons) == 0 {
-				clientReasons = []string{"no clients"}
-			}
-			slices.Sort(clientReasons)
-
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: clientReasons})
-			continue
-		}
-
-		if !hasRoomFor(ready, t.Size) {
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("no ready client has room for %s", humanize.Bytes(t.Size))}})
+	for i, n := range nodes {
+		if reasons[i] != nil {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: reasons[i]})
 			continue
 		}
 
@@ -107,6 +76,52 @@ func selectCandidates(ctx context.Context, t task.Task, nodes []*node.Node) ([]*
 	}
 
 	return candidates, rejected
+}
+
+// checkNode returns why n cannot take the task, or nil if it can.
+func checkNode(ctx context.Context, t task.Task, n *node.Node) []string {
+	if status := n.Status(); status != node.StatusReady {
+		return []string{fmt.Sprintf("node not ready (%s)", status)}
+	}
+
+	// match nodes by labels
+	nodeLabels, err := n.GetLabels(ctx)
+	if err != nil {
+		log.Error().Err(err).Msgf("could not get labels for node %s", n.Name)
+		return []string{"could not fetch labels"}
+	}
+
+	if !checkLabels(t.Labels, nodeLabels) {
+		return []string{"labels do not match task"}
+	}
+
+	stat, err := n.GetStats(ctx)
+	if err != nil {
+		log.Error().Err(err).Msgf("could not get stats for node %s", n.Name)
+		return []string{"could not fetch stats"}
+	}
+
+	// the agent only adds the torrent to its ready clients with room, so
+	// the node needs one such client, not all of them
+	ready := readyClients(stat.ClientStats)
+	if len(ready) == 0 {
+		var clientReasons []string
+		for _, clientStats := range stat.ClientStats {
+			clientReasons = append(clientReasons, fmt.Sprintf("client %s: %s", clientStats.Name, formatReasons(clientStats.Reasons)))
+		}
+		if len(clientReasons) == 0 {
+			clientReasons = []string{"no clients"}
+		}
+		slices.Sort(clientReasons)
+
+		return clientReasons
+	}
+
+	if !hasRoomFor(ready, t.Size) {
+		return []string{fmt.Sprintf("no ready client has room for %s", humanize.Bytes(t.Size))}
+	}
+
+	return nil
 }
 
 // readyClients returns the clients that report READY.
