@@ -214,3 +214,33 @@ func TestServer_SetDown(t *testing.T) {
 	_, err = c.GetTorrentsActiveDownloadsCtx(ctx)
 	require.NoError(t, err)
 }
+
+func TestServer_AddTorrentFromMemory(t *testing.T) {
+	tr := faketracker.New(t)
+	_, hash := tr.Add("Memory.Release-GRP", 10<<20)
+
+	s := New(t, WithAddedBecomeActive())
+	c := newClient(s)
+	ctx := context.Background()
+
+	_, err := c.AddTorrentFromMemoryCtx(ctx, tr.Torrent("Memory.Release-GRP"), map[string]string{"category": "tv"})
+	require.NoError(t, err)
+
+	added := s.Added()
+	require.Len(t, added, 1)
+	assert.Empty(t, added[0].URL)
+	assert.Equal(t, hash, added[0].Hash)
+	assert.Equal(t, "Memory.Release-GRP", added[0].Name)
+	assert.Equal(t, int64(10<<20), added[0].Size)
+	assert.Equal(t, "tv", added[0].Category)
+
+	active, err := c.GetTorrentsActiveDownloadsCtx(ctx)
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	assert.Equal(t, hash, active[0].Hash)
+	assert.Zero(t, tr.Downloads("Memory.Release-GRP"), "an uploaded file is not fetched")
+
+	_, err = c.AddTorrentFromMemoryCtx(ctx, []byte("not a torrent"), map[string]string{})
+	assert.ErrorIs(t, err, qbittorrent.ErrTorrentAddFailed)
+	assert.Len(t, s.Added(), 1)
+}

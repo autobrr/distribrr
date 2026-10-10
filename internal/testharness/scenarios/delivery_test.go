@@ -95,3 +95,64 @@ func TestTaskDelivery(t *testing.T) {
 		assert.Less(t, time.Since(start), 5*time.Second)
 	})
 }
+
+// The agent hands qBittorrent the .torrent it already fetched, so qbit does
+// not fetch the URL again: one-time links and rate-limited trackers would make
+// that second fetch fail after the agent reported success.
+func TestTorrentUpload(t *testing.T) {
+	t.Parallel()
+
+	t.Run("qbit gets the fetched file, the tracker serves it once", func(t *testing.T) {
+		e := newEnv(t)
+
+		qbit := fakeqbit.New(t, fakeqbit.WithAddedBecomeActive())
+		a := e.AddAgent(t, testharness.AgentSpec{
+			Name:    "node1",
+			Clients: []testharness.ClientSpec{{Name: "qbit", Qbit: qbit}},
+		})
+		e.WaitReady(t, a)
+
+		u, hash := e.tracker.Add("Upload.Release-GRP", 10*mb)
+		tk := taskFor(u, "Upload.Release-GRP")
+		tk.Category = "race"
+
+		status, body := e.Webhook(t, tk)
+		require.Equal(t, http.StatusCreated, status, body)
+
+		added := qbit.Added()
+		require.Len(t, added, 1)
+		assert.Empty(t, added[0].URL, "added by URL instead of by file")
+		assert.Equal(t, hash, added[0].Hash)
+		assert.Equal(t, "race", added[0].Category)
+		assert.Equal(t, 1, e.tracker.Downloads("Upload.Release-GRP"))
+	})
+
+	t.Run("every client and replica gets the file from one fetch per agent", func(t *testing.T) {
+		e := newEnv(t)
+
+		var qbits []*fakeqbit.Server
+		for _, name := range []string{"node1", "node2"} {
+			q1, q2 := fakeqbit.New(t), fakeqbit.New(t)
+			a := e.AddAgent(t, testharness.AgentSpec{
+				Name:    name,
+				Clients: []testharness.ClientSpec{{Name: "qbit1", Qbit: q1}, {Name: "qbit2", Qbit: q2}},
+			})
+			e.WaitReady(t, a)
+			qbits = append(qbits, q1, q2)
+		}
+
+		u, hash := e.tracker.Add("Replicas.Upload-GRP", 10*mb)
+		tk := taskFor(u, "Replicas.Upload-GRP")
+		tk.MaxAllowedReplicas = 2
+
+		status, body := e.Webhook(t, tk)
+		require.Equal(t, http.StatusCreated, status, body)
+
+		for _, q := range qbits {
+			added := q.Added()
+			require.Len(t, added, 1)
+			assert.Equal(t, hash, added[0].Hash)
+		}
+		assert.Equal(t, 2, e.tracker.Downloads("Replicas.Upload-GRP"))
+	})
+}

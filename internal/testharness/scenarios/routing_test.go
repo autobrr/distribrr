@@ -128,7 +128,8 @@ func TestTask_categoryAndTagsReachQbit(t *testing.T) {
 	a, q := e.agent(t, "node1", nil)
 	e.WaitReady(t, a)
 
-	tk := e.release("Opts.Release-GRP", 10*mb)
+	u, hash := e.tracker.Add("Opts.Release-GRP", 10*mb)
+	tk := taskFor(u, "Opts.Release-GRP")
 	tk.Category = "race"
 	tk.Tags = "race,distribrr"
 
@@ -137,7 +138,7 @@ func TestTask_categoryAndTagsReachQbit(t *testing.T) {
 
 	added := q.Added()
 	require.Len(t, added, 1)
-	assert.Equal(t, tk.DownloadURL, added[0].URL)
+	assert.Equal(t, hash, added[0].Hash)
 	assert.Equal(t, "race", added[0].Category)
 	assert.Equal(t, "race,distribrr", added[0].Tags)
 }

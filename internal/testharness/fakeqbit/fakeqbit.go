@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -45,15 +47,18 @@ type Torrent struct {
 	State string
 }
 
-// AddedTorrent is one URL accepted by torrents/add.
+// AddedTorrent is one URL or uploaded .torrent file accepted by torrents/add.
 type AddedTorrent struct {
+	// URL is empty for an uploaded file.
 	URL      string
 	Category string
 	Tags     string
 	// Options holds every form field of the request except urls.
 	Options map[string]string
-	// Hash and Size are only set when WithAddedBecomeActive fetched the torrent.
+	// Hash, Name and Size are set for an uploaded file, and for a URL only
+	// when WithAddedBecomeActive fetched the torrent.
 	Hash string
+	Name string
 	Size int64
 	At   time.Time
 }
@@ -70,7 +75,7 @@ func WithCredentials(username, password string) Option {
 }
 
 // WithAddedBecomeActive makes every added URL become an active download: the
-// fake fetches the .torrent, parses it and adds a "downloading" torrent with
+// fake fetches the .torrent (or parses the uploaded file) and adds a "downloading" torrent with
 // zero progress. Without it torrents/add only records the request.
 func WithAddedBecomeActive() Option {
 	return func(s *Server) {
@@ -405,9 +410,7 @@ func (s *Server) add(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if failAdd {
-		w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
-		w.WriteHeader(http.StatusUnsupportedMediaType)
-		_, _ = w.Write([]byte("Fails."))
+		writeFails(w)
 		return
 	}
 
@@ -425,40 +428,72 @@ func (s *Server) add(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if len(urls) == 0 {
-		w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
-		w.WriteHeader(http.StatusUnsupportedMediaType)
-		_, _ = w.Write([]byte("Fails."))
+	// qBittorrent rejects the whole request when an uploaded file is not a
+	// valid torrent
+	var files []AddedTorrent
+	if r.MultipartForm != nil {
+		for _, fh := range r.MultipartForm.File["torrents"] {
+			hash, name, size, err := readUpload(fh.Open)
+			if err != nil {
+				writeFails(w)
+				return
+			}
+
+			files = append(files, AddedTorrent{Hash: hash, Name: name, Size: size})
+		}
+	}
+
+	if len(urls) == 0 && len(files) == 0 {
+		writeFails(w)
 		return
 	}
 
+	added := files
 	for _, u := range urls {
-		at := AddedTorrent{
-			URL:      u,
-			Category: options["category"],
-			Tags:     options["tags"],
-			Options:  options,
-			At:       time.Now(),
-		}
+		at := AddedTorrent{URL: u}
 
 		if s.addedBecomeActive {
-			hash, name, size, err := fetchTorrent(r, u)
-			if err == nil {
-				at.Hash = hash
-				at.Size = size
-
-				s.mu.Lock()
-				s.torrents = append(s.torrents, Torrent{Hash: hash, Name: name, Size: size, AmountLeft: size, ETA: 8640000, State: "downloading"})
-				s.mu.Unlock()
+			if hash, name, size, err := fetchTorrent(r, u); err == nil {
+				at.Hash, at.Name, at.Size = hash, name, size
 			}
 		}
 
-		s.mu.Lock()
-		s.added = append(s.added, at)
-		s.mu.Unlock()
+		added = append(added, at)
 	}
 
+	s.mu.Lock()
+	for _, at := range added {
+		at.Category = options["category"]
+		at.Tags = options["tags"]
+		at.Options = options
+		at.At = time.Now()
+
+		if s.addedBecomeActive && at.Hash != "" {
+			s.torrents = append(s.torrents, Torrent{Hash: at.Hash, Name: at.Name, Size: at.Size, AmountLeft: at.Size, ETA: 8640000, State: "downloading"})
+		}
+
+		s.added = append(s.added, at)
+	}
+	s.mu.Unlock()
+
 	writeText(w, "Ok.")
+}
+
+func writeFails(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+	w.WriteHeader(http.StatusUnsupportedMediaType)
+	_, _ = w.Write([]byte("Fails."))
+}
+
+// readUpload parses an uploaded .torrent file.
+func readUpload(open func() (multipart.File, error)) (hash, name string, size int64, err error) {
+	f, err := open()
+	if err != nil {
+		return "", "", 0, errors.Wrap(err, "could not open upload")
+	}
+	defer f.Close()
+
+	return parseTorrent(f)
 }
 
 func (s *Server) trackers(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +529,12 @@ func fetchTorrent(r *http.Request, u string) (hash, name string, size int64, err
 		return "", "", 0, errors.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	mi, err := metainfo.Load(resp.Body)
+	return parseTorrent(resp.Body)
+}
+
+// parseTorrent returns the infohash, name and total size of a .torrent.
+func parseTorrent(r io.Reader) (hash, name string, size int64, err error) {
+	mi, err := metainfo.Load(r)
 	if err != nil {
 		return "", "", 0, errors.Wrap(err, "could not load metainfo")
 	}
