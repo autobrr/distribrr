@@ -8,7 +8,7 @@ import (
 
 	"github.com/autobrr/distribrr/pkg/sharedhttp"
 
-	"github.com/anacrolix/torrent/metainfo"
+	"github.com/autobrr/go-torrent/metainfo"
 	"github.com/avast/retry-go"
 	"github.com/pkg/errors"
 	"golang.org/x/net/publicsuffix"
