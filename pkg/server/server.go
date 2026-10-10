@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/autobrr/distribrr/pkg/logger"
 	"github.com/autobrr/distribrr/pkg/node"
 	"github.com/autobrr/distribrr/pkg/scheduler"
 	"github.com/autobrr/distribrr/pkg/task"
@@ -471,7 +470,7 @@ func (s *Service) SendWork(ctx context.Context, te task.Event) error {
 	ctx, cancel := context.WithTimeout(ctx, s.WebhookTimeout)
 	defer cancel()
 
-	l := logger.GetWithCtx(ctx)
+	l := log.Ctx(ctx)
 
 	l.Debug().Msgf("received task: %+v", te.Task)
 

@@ -28,6 +28,13 @@ The agent runs on remote servers alongside the torrent clients and has access to
 
     distribrr agent run
 
+## Logging
+
+Both roles log to stdout. Set `LOG_LEVEL` to `trace`, `debug`, `info` (default), `warn` or `error`.
+
+Each request gets a correlation id, taken from the `X-Correlation-ID` header or generated. The server forwards it to the
+agents for a task, so one webhook's log lines share the same `correlation_id` on the server and every agent.
+
 ## Autobrr usage
 
 To use with autobrr set up a new action of type `Webhook` and use the following:

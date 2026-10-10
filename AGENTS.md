@@ -134,7 +134,10 @@ the endpoints go-qbittorrent calls) and fetch `.torrent` files from `faketracker
 node lifecycle.
 
 ## Conventions and current state
-- Log with `zerolog` (`github.com/rs/zerolog/log`); `pkg/logger` gives a context-aware logger and `pkg/middleware` injects a correlation ID per request.
+- Log with `zerolog` (`github.com/rs/zerolog/log`). `logger.Setup` in `main` configures the one global logger (stdout,
+  `LOG_LEVEL`, default info). `middleware.CorrelationID` + `RequestLogger` put a logger carrying `correlation_id` in
+  each request's ctx; on request paths log with `log.Ctx(ctx)`, which falls back to the global logger. The agent and
+  server clients forward the ID in `X-Correlation-ID` (`middleware.CorrelationIDFromContext`).
 - Wrap errors with `github.com/pkg/errors`.
 - Early-stage WIP. There is no task queue or task state: `AddTask` calls `SendWork` synchronously and nothing is
   stored. `task.Task.Nodes` and `ForceAdd` are decoded but not wired up yet. Some commented-out experiments remain;
