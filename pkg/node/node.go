@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -25,18 +24,13 @@ const (
 // registration and config reload use the same Node concurrently, so the
 // fields that change after creation are unexported and guarded by m.
 type Node struct {
-	Name            string    `json:"name"`
-	Ip              string    `json:"ip"`
-	Api             string    `json:"-"`
-	MemoryAllocated int64     `json:"-"`
-	Role            string    `json:"role"`
-	TaskCount       int       `json:"task_count"`
-	DateCreated     time.Time `json:"date_created"`
+	Name        string    `json:"name"`
+	Role        string    `json:"role"`
+	DateCreated time.Time `json:"date_created"`
 
 	m      sync.RWMutex
 	addr   string
 	token  string
-	memory int64
 	stats  stats.Stats
 	status Status
 	labels map[string]string
@@ -55,7 +49,7 @@ func NewNode(name string, clientAddr string, token string, role string) *Node {
 	}
 }
 
-// MarshalJSON keeps the shape the exported fields used to have.
+// MarshalJSON adds the unexported addr, status and labels.
 func (n *Node) MarshalJSON() ([]byte, error) {
 	n.m.RLock()
 	defer n.m.RUnlock()
@@ -63,18 +57,14 @@ func (n *Node) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Name        string            `json:"name"`
 		Addr        string            `json:"addr"`
-		Ip          string            `json:"ip"`
 		Role        string            `json:"role"`
-		TaskCount   int               `json:"task_count"`
 		DateCreated time.Time         `json:"date_created"`
 		Status      Status            `json:"status"`
 		Labels      map[string]string `json:"labels"`
 	}{
 		Name:        n.Name,
 		Addr:        n.addr,
-		Ip:          n.Ip,
 		Role:        n.Role,
-		TaskCount:   n.TaskCount,
 		DateCreated: n.DateCreated,
 		Status:      n.status,
 		Labels:      n.labels,
@@ -199,12 +189,7 @@ func (n *Node) GetStats(ctx context.Context) (*stats.Stats, error) {
 		return nil, err
 	}
 
-	if nodeStats.MemStats == nil {
-		return nil, fmt.Errorf("error getting stats from node %s", n.Name)
-	}
-
 	n.m.Lock()
-	n.memory = int64(nodeStats.MemTotalKb())
 	n.stats = *nodeStats
 	n.m.Unlock()
 

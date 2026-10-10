@@ -14,42 +14,16 @@ type Task struct {
 	Tags               string            `json:"tags"`
 	Indexer            string            `json:"indexer"`
 	Size               uint64            `json:"size"` // torrent size in bytes if known (autobrr {{ .Size }}), 0 if unknown
-	State              State             `json:"-"`
-	Cpu                float64           `json:"cpu"`
-	Memory             int64             `json:"memory"`
-	Disk               int64             `json:"disk"`
 	SchedulerType      string            `json:"scheduler_type"`
 	MaxAllowedReplicas int               `json:"max_replicas"`
 	Labels             map[string]string `json:"labels"`
-	Nodes              []string          `json:"nodes"`
-	ForceAdd           bool              `json:"force_add"`
-
-	StartTime  time.Time `json:"-"`
-	FinishTime time.Time `json:"-"`
-}
-
-func NewTask() Task {
-	return Task{
-		ID:                 uuid.New(),
-		DownloadURL:        "",
-		Name:               "",
-		Category:           "",
-		Tags:               "",
-		Size:               0,
-		State:              Pending,
-		Cpu:                0,
-		Memory:             0,
-		Disk:               0,
-		SchedulerType:      "",
-		MaxAllowedReplicas: 0,
-		StartTime:          time.Time{},
-		FinishTime:         time.Time{},
-	}
+	// Nodes and ForceAdd are accepted but not wired up yet.
+	Nodes    []string `json:"nodes"`
+	ForceAdd bool     `json:"force_add"`
 }
 
 type Event struct {
 	ID        uuid.UUID `json:"id"`
-	State     State     `json:"state"`
 	Timestamp time.Time `json:"timestamp"`
 	Task      Task      `json:"task"`
 }
@@ -57,7 +31,6 @@ type Event struct {
 func NewEvent() Event {
 	return Event{
 		ID:        uuid.New(),
-		State:     Pending,
 		Timestamp: time.Now().UTC(),
 		Task:      Task{},
 	}

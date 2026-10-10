@@ -40,10 +40,6 @@ type JoinRequest struct {
 	Token      string            `json:"token"`
 }
 
-type JoinResponse struct {
-	NodeName string `json:"node_name"`
-}
-
 func (c *Client) JoinRequest(ctx context.Context, joinReq JoinRequest) error {
 	reqUrl, err := c.buildUrl("/node/register", nil)
 	if err != nil {

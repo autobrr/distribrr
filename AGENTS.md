@@ -59,9 +59,9 @@ restart on both; a bad file is logged and the old config kept.
   then **saves the node to the server's own config file** before updating memory. The server config is mutable state,
   not just input.
 - Nodes are identified by name: re-registering updates the existing node's addr, token and labels (and revives a
+  `REMOVED` node) instead of adding a duplicate.
 - Node labels are saved in the server config (`nodes[].labels`) on register, so they survive restarts. Nodes without
   saved labels fetch them from the agent once and cache them.
-  `REMOVED` node) instead of adding a duplicate.
 - Deregister flips the node to `REMOVED` on purpose; it stays in memory and in the config file. Unknown names give 404.
 - `HealthChecks` pings every non-removed agent at startup and then every 10s, and sets `READY` / `UNKNOWN`. A node
   is `READY` as soon as it registers (the token callback reached it).
@@ -134,7 +134,9 @@ node lifecycle.
 ## Conventions and current state
 - Log with `zerolog` (`github.com/rs/zerolog/log`); `pkg/logger` gives a context-aware logger and `pkg/middleware` injects a correlation ID per request.
 - Wrap errors with `github.com/pkg/errors`.
-- Early-stage WIP. There is no task queue: `AddTask` / `QueueTask` call `SendWork` synchronously, and the `task.State` machine (`pkg/task/state.go`) is unused. Many methods are stubs or commented-out experiments; check that a subsystem is wired up before relying on it.
+- Early-stage WIP. There is no task queue or task state: `AddTask` calls `SendWork` synchronously and nothing is
+  stored. `task.Task.Nodes` and `ForceAdd` are decoded but not wired up yet. Some commented-out experiments remain;
+  check that a subsystem is wired up before relying on it.
 
 ## Commits and PRs
 - Conventional Commits, lowercase: `type(scope): subject`, e.g. `fix(agent): accepted torrents larger than free storage`. Scopes in use include `agent`, `scheduler`, `api`, `deps`.
