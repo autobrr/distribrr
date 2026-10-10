@@ -1,8 +1,11 @@
 package stats
 
 import (
+	"syscall"
+
 	"github.com/autobrr/go-qbittorrent"
 	"github.com/c9s/goprocinfo/linux"
+	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 )
 
@@ -59,6 +62,7 @@ const (
 	ReasonMaxDownloadsReached NotReadyReason = "max_downloads_reached"
 	ReasonDiskFull            NotReadyReason = "disk_full"
 	ReasonClientUnreachable   NotReadyReason = "client_unreachable"
+	ReasonStorageUnavailable  NotReadyReason = "storage_unavailable"
 )
 
 type ClientStats struct {
@@ -166,20 +170,31 @@ func GetDiskInfo() *linux.Disk {
 	return diskstats
 }
 
-// GetDiskInfoByPath See https://godoc.org/github.com/c9s/goprocinfo/linux#Disk
-func GetDiskInfoByPath(path string) *linux.Disk {
+// GetDiskInfoByPath reads disk stats for path via statfs. Unlike GetDiskInfo it
+// returns the error, so callers can tell an unreadable path apart from a full disk.
+//
+// Free is the space available to unprivileged users (Bavail), not Bfree as in
+// linux.ReadDisk, which counts root-reserved blocks the agent cannot write to.
+func GetDiskInfoByPath(path string) (*linux.Disk, error) {
 	if path == "" {
 		path = "/"
 	}
 
-	diskstats, err := linux.ReadDisk(path)
-	if err != nil {
-		//log.("Error reading from: %q", path)
-		log.Error().Err(err).Msgf("Error reading from: %q", path)
-		return &linux.Disk{}
+	fs := syscall.Statfs_t{}
+	if err := syscall.Statfs(path, &fs); err != nil {
+		return nil, errors.Wrapf(err, "could not read disk stats for path %q", path)
 	}
 
-	return diskstats
+	bsize := uint64(fs.Bsize)
+
+	disk := &linux.Disk{
+		All:        fs.Blocks * bsize,
+		Free:       fs.Bavail * bsize,
+		Used:       (fs.Blocks - fs.Bfree) * bsize,
+		FreeInodes: fs.Ffree,
+	}
+
+	return disk, nil
 }
 
 // GetCpuStats GetCpuInfo See https://godoc.org/github.com/c9s/goprocinfo/linux#CPUStat

@@ -13,6 +13,7 @@ import (
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/autobrr/go-qbittorrent"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
@@ -362,28 +363,7 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 
 		l.Trace().Msg("check disk per path for client")
 
-		// storageOK stays true while every configured storage path still
-		// satisfies its minFree / maxUsage rule.
-		storageOK := true
-
-		for _, storage := range client.Rules.Storage {
-			l.Trace().Msgf("check disk for path %q", storage.Path)
-
-			disk := stats.GetDiskInfoByPath(storage.Path)
-			st.DiskPathStats[storage.Path] = disk
-
-			allowed, err := storage.allows(disk.Free, disk.Used)
-			if err != nil {
-				// bad threshold config: log and treat the rule as non-binding
-				l.Warn().Err(err).Msgf("ignoring storage rule for path %q", storage.Path)
-				continue
-			}
-
-			if !allowed {
-				storageOK = false
-				l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, disk.Used)
-			}
-		}
+		storageReasons := checkStorage(l, client.Rules.Storage, st)
 
 		l.Trace().Msg("get active torrents for client")
 
@@ -393,10 +373,7 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 
 			// can't reach the client: report it as not ready so the scheduler
 			// skips it and the reason is visible, instead of silently dropping it.
-			reasons := []stats.NotReadyReason{stats.ReasonClientUnreachable}
-			if !storageOK {
-				reasons = append(reasons, stats.ReasonDiskFull)
-			}
+			reasons := append([]stats.NotReadyReason{stats.ReasonClientUnreachable}, storageReasons...)
 
 			st.ClientStats[name] = stats.ClientStats{
 				Name:                      name,
@@ -427,9 +404,7 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 		if !downloadsOK {
 			reasons = append(reasons, stats.ReasonMaxDownloadsReached)
 		}
-		if !storageOK {
-			reasons = append(reasons, stats.ReasonDiskFull)
-		}
+		reasons = append(reasons, storageReasons...)
 
 		status := stats.ClientStatusReady
 		if len(reasons) > 0 {
@@ -452,6 +427,50 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 
 		st.ClientStats[name] = ct
 	}
+}
+
+// checkStorage checks every storage rule against its path and records the disk
+// stats in st. It returns ReasonDiskFull when a readable path breaks its
+// minFree / maxUsage rule, and ReasonStorageUnavailable when a path cannot be
+// read at all (missing mount, typo), so the two are not confused.
+func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats) []stats.NotReadyReason {
+	diskFull := false
+	unavailable := false
+
+	for _, storage := range rules {
+		l.Trace().Msgf("check disk for path %q", storage.Path)
+
+		disk, err := stats.GetDiskInfoByPath(storage.Path)
+		if err != nil {
+			unavailable = true
+			l.Error().Err(err).Msgf("storage path %q is unavailable", storage.Path)
+			continue
+		}
+
+		st.DiskPathStats[storage.Path] = disk
+
+		allowed, err := storage.allows(disk.Free, disk.Used)
+		if err != nil {
+			// bad threshold config: log and treat the rule as non-binding
+			l.Warn().Err(err).Msgf("ignoring storage rule for path %q", storage.Path)
+			continue
+		}
+
+		if !allowed {
+			diskFull = true
+			l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, disk.Used)
+		}
+	}
+
+	var reasons []stats.NotReadyReason
+	if diskFull {
+		reasons = append(reasons, stats.ReasonDiskFull)
+	}
+	if unavailable {
+		reasons = append(reasons, stats.ReasonStorageUnavailable)
+	}
+
+	return reasons
 }
 
 func (s *Service) GetLabels() map[string]string {
