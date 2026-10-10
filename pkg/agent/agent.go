@@ -575,11 +575,11 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 		sender.Go(func() error {
 			log.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
 
-			// TODO read from memory
-
-			// send downloads; go-qbittorrent writes to the options map, so
-			// every client gets its own copy
-			if _, err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, maps.Clone(opts)); err != nil {
+			// add the file we already fetched: a URL add only queues the
+			// fetch in qbit, so a failed second fetch would go unnoticed.
+			// go-qbittorrent writes to the options map, so every client gets
+			// its own copy
+			if _, err := client.Client.AddTorrentFromMemoryCtx(ctx, rel.File, maps.Clone(opts)); err != nil {
 				log.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
 				return err
 			}

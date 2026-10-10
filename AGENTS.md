@@ -86,6 +86,8 @@ restart on both; a bad file is logged and the old config kept.
   before fetching the `.torrent` (with the webhook size, if any), then re-checks with the exact size from the
   `.torrent`. No ready client returns `ErrNoReadyClients` (HTTP 503); no ready client with room returns
   `ErrInsufficientStorage` (HTTP 507).
+- The agent uploads the `.torrent` it fetched (`AddTorrentFromMemoryCtx`), never the URL: qbit only queues a URL add,
+  so a failed second fetch would still count as success.
 - After adding, the agent re-announces in a goroutine.
 - Timeouts nest so the agent answers first: agent `TaskTimeout` (60s, covers the client check, `.torrent` fetch and
   add) < server `TaskTimeout` (75s per agent) < server `WebhookTimeout` (100s per webhook) < autobrr's webhook timeout

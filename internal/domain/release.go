@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"time"
@@ -38,6 +40,8 @@ type Release struct {
 	Name      string
 	Indexer   string
 	Size      uint64
+	// File is the .torrent, set by DownloadTorrentFile.
+	File []byte
 }
 
 func (r *Release) SetCookies(cookie string) {
@@ -92,7 +96,12 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 			return errors.Errorf("unexpected status: %v", resp.StatusCode)
 		}
 
-		meta, err := metainfo.Load(resp.Body)
+		file, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return errors.Wrap(err, "error reading torrent file")
+		}
+
+		meta, err := metainfo.Load(bytes.NewReader(file))
 		if err != nil {
 			return retry.Unrecoverable(errors.Wrapf(err, "metainfo could not load file contents: %v", r.Name))
 		}
@@ -109,6 +118,7 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 
 		r.Hash = meta.HashInfoBytes().String()
 		r.Size = uint64(torrentMetaInfo.TotalLength())
+		r.File = file
 
 		return nil
 	},
