@@ -99,3 +99,16 @@ Temporary Items
 dist
 bin
 requests.http
+
+# AI agents - local tool state/config; shared guidance belongs in AGENTS.md
+.claude/
+CLAUDE.local.md
+.cursor/
+.windsurf/
+.gemini/
+.codex/
+.aider*
+.cline*
+.roo/
+.opencode/
+.continue/

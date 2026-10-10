@@ -1,0 +1,101 @@
+# AGENTS.md
+
+Guidance for AI coding agents (Claude Code, Codex, Cursor, etc.) working in this repository.
+
+## Agent Setup
+
+- **Claude Code**: if `.claude/settings.local.json` does not exist, create it with the content below before anything else, then continue with your task. It turns off AI attribution in commits and PRs.
+
+```json
+{
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  }
+}
+```
+
+- `.claude/settings.local.json` is personal: keep it out of every commit. It is ignored by the maintainer's global git ignore, not by the repo's `.gitignore`, so never `git add` it explicitly.
+- Whatever the settings say, commit messages and PR descriptions carry no AI attribution (see Commits and PRs).
+
+## What this is
+
+A single Go binary that runs as **either** a `server` (manager) **or** an `agent` (worker). autobrr fires a webhook at the server; the server picks agents via a scheduler and forwards the task; each chosen agent adds the torrent to its local qBittorrent client(s).
+
+```
+announce -> autobrr -> filters -> actions(webhook) -> distribrr server
+                                                          \-> agent -> qbittorrent client(s)
+                                                          \-> agent -> qbittorrent client(s)
+```
+
+## Commands
+
+```sh
+make build                 # deps + static linux/amd64 binary -> bin/distribrr (CGO_ENABLED=0)
+go build ./...             # quick compile check (any host arch)
+go test ./...              # all tests
+go test ./pkg/scheduler/ -run TestLeastActive_Score -v   # single test
+go vet ./...               # currently fails: unused slices.DeleteFunc result in pkg/server/server.go removeNodeFromConfig
+nilaway ./...              # only configured linter; CI runs it continue-on-error, not yet clean
+```
+
+Go version comes from `go.mod` (1.26). Run with `distribrr server run --config-file config_server.yaml` / `distribrr agent run --config-file config_agent.yaml`. Only `--http-host`, `--http-port`, `--http-api-token` exist as flags; everything else comes from YAML.
+
+## Architecture
+
+### Dual-role binary
+`cmd/server.go` and `cmd/agent.go` build a `Config`, load YAML, and call `Service.Run()` in `pkg/server` or `pkg/agent`. Both serve a chi router from their `api.go` and block on signals.
+
+### Server (manager): `pkg/server`, default port 7422
+- autobrr posts to `POST /api/v1/tasks?apikey=TOKEN`. The body is a bare `task.Task` (see README for the webhook payload).
+- `SendWork` -> `selectWorkers` -> `node.StartTask` on each chosen agent concurrently. Best-effort: the task counts as scheduled if at least one agent accepts it. Otherwise autobrr gets 502 with a per-node rejection summary (`summarizeRejections`).
+- Agents self-register at `POST /api/v1/node/register`. `OnRegister` verifies the agent's token by calling back to it, then **appends the node to the server's own config file** (`Config.WriteToFile`). The server config is mutable state, not just input.
+- Deregister only flips the node to `REMOVED`; it stays in memory and in the config file.
+- `HealthChecks` pings every non-removed agent every 10s and sets `READY` / `UNKNOWN`.
+
+### Agent (worker): `pkg/agent`, default port 7430
+- Runs next to qBittorrent with access to its storage paths. `Register()` retries every 10s until `Join` succeeds.
+- Endpoints: `POST /api/v1/tasks`, `/api/v1/stats`, `/api/v1/labels`, `/api/v1/verify` (all auth-gated).
+- Host stats come from `/proc` via goprocinfo and disk stats from `statfs` (`pkg/stats`), so the agent is effectively Linux-only.
+
+### Client readiness and storage (`pkg/agent/agent.go`)
+`clientStats` decides each qbit client's `READY` / `NOT_READY` status and its `NotReadyReason`s (defined in `pkg/stats`: `max_downloads_reached`, `disk_full`, `client_unreachable`, `storage_unavailable`, `storage_measuring`). A client can report several reasons.
+- Downloads: ready while active downloads < `rules.torrents.maxActiveDownloads`. Exactly at the limit it is still ready if one active torrent is ≥75% done with ETA ≤60s.
+- Storage: `checkStorage` applies each `rules.storage` entry (`StorageRule.headroom` in `config.go`). `minFree` is free space on the path's filesystem. `maxUsage` is the space the files under the path take, du-style (`stats.GetDirUsage`), not the filesystem.
+- `maxUsage` paths are walked in the background by `dirUsageCache.run` every minute; stats only read the cache. Until the first walk finishes the client reports `storage_measuring`.
+- The remaining bytes of active downloads are reserved against both rules, unless qbit's `preallocate_all` is on (`reservedBytes`).
+- Each client reports `storage_headroom`: bytes that still fit across all its rules, omitted when it has no storage rules.
+
+### Tasks and size
+- `task.Task.Size` (`size`, bytes) is optional: 0 means unknown; autobrr fills it with `{{ .Size }}`.
+- Agent `StartTask` adds the torrent only to clients with room (`clientsWithRoom`), not to all clients. With a known size it checks before fetching the `.torrent`, then re-checks with the exact size from the `.torrent`. No client with room returns `ErrInsufficientStorage`, which the API maps to HTTP 507.
+- After adding, the agent re-announces in a goroutine.
+
+### The two HTTP clients (directionality is the confusing part)
+- `pkg/agent/client.go` (package `agent`, type `Client`) is used **by the server to call an agent**. `pkg/node.Node` wraps one; `Node` is the server-side handle for a worker.
+- `pkg/server/client/client.go` (package `serverclient`) is used **by the agent to call the server** (register/deregister).
+- "Agent client" calls into an agent; "server client" calls into the server. Both send the raw token in the `Authorization` header.
+
+### Scheduling: `pkg/scheduler`
+`LeastActive` is the only implementation and is hardcoded in `server.selectWorkers`. The `Scheduler` interface exists but nothing dispatches through it; greedy/roundrobin/epvm appear only in a commented-out `SelectWorkers` in `pkg/server/server.go`. Three phases:
+1. `SelectCandidateNodes`: keeps nodes that are `READY`, whose labels match the task (`checkLabels`: every task label must be present and equal on the node), whose clients are all `READY`, and, when `size` is set, where at least one client has room (`hasRoomFor`). Every rejected node gets a `NodeRejection` with reasons.
+2. `Score`: base 100, +20 per client with zero active downloads, minus per-torrent penalties weighted by remaining progress and ETA.
+3. `PickN`: sort by score descending, take `task.MaxAllowedReplicas` nodes (default 1, capped at the candidate count).
+
+### Auth and config
+- One shared token. `pkg/middleware.IsAuthenticated` checks, in order, `X-API-Token`, the raw `Authorization` header (no `Bearer` scheme), then `?apikey=`. The first one present decides; no credential gives 401. Comparison is plain `!=`, not constant-time.
+- Config is koanf + YAML (`pkg/server/config.go`, `pkg/agent/config.go`). koanf matches keys to struct fields by name, so the `yaml:` tags only matter where the server marshals its config back to disk.
+- Some keys in `config_agent.yaml` are read by no code: `type`, `paths`, `tier`, `maxTotalDownloads`, `maxTotalTorrents`.
+
+## Conventions and current state
+- Log with `zerolog` (`github.com/rs/zerolog/log`); `pkg/logger` gives a context-aware logger and `pkg/middleware` injects a correlation ID per request.
+- Wrap errors with `github.com/pkg/errors`.
+- Early-stage WIP. There is no task queue: `AddTask` / `QueueTask` call `SendWork` synchronously, and the `task.State` machine (`pkg/task/state.go`) is unused. Many methods are stubs or commented-out experiments; check that a subsystem is wired up before relying on it.
+
+## Commits and PRs
+- Conventional Commits, lowercase: `type(scope): subject`, e.g. `fix(agent): accepted torrents larger than free storage`. Scopes in use include `agent`, `scheduler`, `api`, `deps`.
+- The subject names the symptom being fixed, not the implementation.
+- Subject line only, no body.
+- No AI attribution in commits: no `Co-Authored-By` or "Generated with" trailers in commits.
+- PR description follow PR template and includes AI attribution.
