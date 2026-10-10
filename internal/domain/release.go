@@ -44,6 +44,9 @@ func (r *Release) SetCookies(cookie string) {
 	r.RawCookie = cookie
 }
 
+// downloadAttemptTimeout bounds one attempt to fetch the .torrent file.
+const downloadAttemptTimeout = 20 * time.Second
+
 func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 	if r.Url == "" {
 		return errors.New("download_file: url can't be empty")
@@ -57,7 +60,7 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 	client := &http.Client{
 		Transport: sharedhttp.TransportTLSInsecure,
 		Jar:       jar,
-		Timeout:   time.Second * 45,
+		Timeout:   downloadAttemptTimeout,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.Url, nil)
@@ -109,9 +112,12 @@ func (r *Release) DownloadTorrentFile(ctx context.Context) error {
 
 		return nil
 	},
-		retry.Delay(time.Second*3),
+		// stop retrying once ctx is done, so the agent's task deadline bounds
+		// the whole download
+		retry.Context(ctx),
+		retry.Delay(time.Second),
 		retry.Attempts(3),
-		retry.MaxJitter(time.Second*1),
+		retry.MaxJitter(500*time.Millisecond),
 	)
 
 	return errFunc

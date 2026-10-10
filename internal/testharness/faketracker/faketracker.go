@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
@@ -24,6 +25,12 @@ const torrentPrefix = "/torrent/"
 type entry struct {
 	data   []byte
 	status int
+
+	// delay holds every answer back; failFirst answers failStatus to the
+	// first failFirst requests
+	delay      time.Duration
+	failFirst  int
+	failStatus int
 }
 
 // Tracker serves .torrent files. All methods are safe for concurrent use.
@@ -80,6 +87,29 @@ func (tr *Tracker) AddStatus(name string, status int) string {
 	return tr.urlFor(name)
 }
 
+// SetDelay holds every answer for name back by d, like a slow tracker. A
+// request whose client gives up is answered early.
+func (tr *Tracker) SetDelay(name string, d time.Duration) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+
+	e := tr.entries[name]
+	e.delay = d
+	tr.entries[name] = e
+}
+
+// FailFirst makes the first n requests for name answer status, like a
+// tracker that is briefly overloaded. Later requests are served normally.
+func (tr *Tracker) FailFirst(name string, n int, status int) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+
+	e := tr.entries[name]
+	e.failFirst = n
+	e.failStatus = status
+	tr.entries[name] = e
+}
+
 // Torrent returns the .torrent bytes registered for name, or nil.
 func (tr *Tracker) Torrent(name string) []byte {
 	tr.mu.Lock()
@@ -111,11 +141,26 @@ func (tr *Tracker) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	tr.mu.Lock()
 	tr.downloads[name]++
 	e, ok := tr.entries[name]
+	failing := ok && e.failFirst > 0
+	if failing {
+		e.failFirst--
+		tr.entries[name] = e
+	}
 	tr.mu.Unlock()
+
+	if ok && e.delay > 0 {
+		select {
+		case <-time.After(e.delay):
+		case <-r.Context().Done():
+			return
+		}
+	}
 
 	switch {
 	case !ok:
 		http.NotFound(w, r)
+	case failing:
+		http.Error(w, http.StatusText(e.failStatus), e.failStatus)
 	case e.status != http.StatusOK:
 		http.Error(w, http.StatusText(e.status), e.status)
 	default:

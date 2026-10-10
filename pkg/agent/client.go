@@ -26,6 +26,10 @@ type Client struct {
 	token string
 
 	http *http.Client
+	// taskHTTP has no timeout of its own: an agent can take much longer than
+	// DefaultTimeout to fetch the .torrent and add it, so the caller's ctx
+	// bounds StartTask instead.
+	taskHTTP *http.Client
 }
 
 func NewClient(addr, name, token string) *Client {
@@ -36,6 +40,7 @@ func NewClient(addr, name, token string) *Client {
 		http: &http.Client{
 			Timeout: DefaultTimeout,
 		},
+		taskHTTP: &http.Client{},
 	}
 }
 
@@ -191,7 +196,7 @@ func (c *Client) startTask(ctx context.Context, te *task.Event) error {
 
 	c.setHeaders(ctx, req)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.taskHTTP.Do(req)
 	if err != nil {
 		return errors.Wrapf(err, "error during request for node: %s", c.name)
 	}

@@ -35,12 +35,12 @@ type env struct {
 	tracker *faketracker.Tracker
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, opts ...testharness.Option) *env {
 	t.Helper()
 	t.Parallel()
 
 	return &env{
-		Harness: testharness.New(t),
+		Harness: testharness.New(t, opts...),
 		tracker: faketracker.New(t),
 	}
 }
