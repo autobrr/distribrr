@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	mw "github.com/autobrr/distribrr/pkg/middleware"
+	"github.com/autobrr/distribrr/pkg/scheduler"
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/go-chi/chi/v5"
@@ -157,7 +158,11 @@ func (s *APIServer) Handler() http.Handler {
 					ctx := context.WithoutCancel(r.Context())
 
 					if err := s.service.AddTask(ctx, te); err != nil {
-						render.Status(r, http.StatusBadGateway)
+						status := http.StatusBadGateway
+						if errors.Is(err, scheduler.ErrUnknownType) {
+							status = http.StatusBadRequest
+						}
+						render.Status(r, status)
 						render.JSON(w, r, map[string]string{"error": err.Error()})
 						return
 					}

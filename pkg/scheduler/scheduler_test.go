@@ -89,27 +89,18 @@ func Test_matchLabels(t *testing.T) {
 }
 
 func TestLeastActive_Score(t *testing.T) {
-	type fields struct {
-		Name       string
-		LastWorker int
-	}
 	type args struct {
 		ctx   context.Context
 		t     task.Task
 		nodes []*node.Node
 	}
 	tests := []struct {
-		name   string
-		fields fields
-		args   args
-		want   map[string]float64
+		name string
+		args args
+		want map[string]float64
 	}{
 		{
 			name: "test_1",
-			fields: fields{
-				Name:       "leastActive",
-				LastWorker: 0,
-			},
 			want: map[string]float64{
 				"node0": 120,
 				"node1": 96.49774305555556,
@@ -180,10 +171,7 @@ func TestLeastActive_Score(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &LeastActive{
-				Name:       tt.fields.Name,
-				LastWorker: tt.fields.LastWorker,
-			}
+			r := &LeastActive{}
 
 			got := r.Score(tt.args.ctx, tt.args.t, tt.args.nodes)
 			assert.Equal(t, tt.want, got)
@@ -376,4 +364,59 @@ func testNodeAt(addr string, name string) *node.Node {
 	n.SetLabels(map[string]string{})
 
 	return n
+}
+
+func TestRoundRobin_PickN(t *testing.T) {
+	names := func(nodes []*node.Node) []string {
+		out := make([]string, len(nodes))
+		for i, n := range nodes {
+			out[i] = n.Name
+		}
+		return out
+	}
+	nodes := func(names ...string) []*node.Node {
+		out := make([]*node.Node, len(names))
+		for i, name := range names {
+			out[i] = &node.Node{Name: name}
+		}
+		return out
+	}
+
+	t.Run("takes turns in name order", func(t *testing.T) {
+		r := &RoundRobin{}
+
+		var got []string
+		for range 4 {
+			got = append(got, names(r.PickN(nil, nodes("node2", "node0", "node1"), 1))...)
+		}
+
+		assert.Equal(t, []string{"node0", "node1", "node2", "node0"}, got)
+	})
+
+	t.Run("replicas continue the turn and wrap", func(t *testing.T) {
+		r := &RoundRobin{}
+
+		assert.Equal(t, []string{"node0", "node1"}, names(r.PickN(nil, nodes("node0", "node1", "node2"), 2)))
+		assert.Equal(t, []string{"node2", "node0"}, names(r.PickN(nil, nodes("node0", "node1", "node2"), 2)))
+	})
+
+	t.Run("a missing node does not reset the turn", func(t *testing.T) {
+		r := &RoundRobin{}
+
+		assert.Equal(t, []string{"node0"}, names(r.PickN(nil, nodes("node0", "node1", "node2"), 1)))
+		assert.Equal(t, []string{"node2"}, names(r.PickN(nil, nodes("node0", "node2"), 1)))
+		assert.Equal(t, []string{"node0"}, names(r.PickN(nil, nodes("node0", "node1", "node2"), 1)))
+	})
+
+	t.Run("more than available is clamped", func(t *testing.T) {
+		r := &RoundRobin{}
+
+		assert.Len(t, r.PickN(nil, nodes("node0", "node1"), 5), 2)
+	})
+
+	t.Run("no candidates returns nil", func(t *testing.T) {
+		r := &RoundRobin{}
+
+		assert.Nil(t, r.PickN(nil, nil, 1))
+	})
 }

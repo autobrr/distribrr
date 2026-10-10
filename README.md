@@ -40,6 +40,7 @@ To use with autobrr set up a new action of type `Webhook` and use the following:
       "download_url": "{{ .DownloadUrl }}",
       "name": "{{ .TorrentName }}",
       "max_replicas": 2,
+      "scheduler_type": "least_active",
       "category": "race",
       "tags": "race,distribrr",
       "indexer": "{{ .IndexerName }}",
@@ -49,6 +50,12 @@ To use with autobrr set up a new action of type `Webhook` and use the following:
       }
     }
     ```
+
+   `scheduler_type` is optional and picks how nodes are chosen for this filter:
+   - `least_active` (default): the nodes with the fewest and furthest along active downloads.
+   - `round_robin`: nodes take turns in name order, whatever their load.
+
+   Both only consider ready nodes that match `labels`. An unknown value is rejected with `400`.
 
     `size` is optional. When it is set, the server skips nodes where no client has storage room for the torrent, so another node can take it. It is `0` when autobrr does not know the size yet; the agent then checks against the size from the `.torrent` file.
 

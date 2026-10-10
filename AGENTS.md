@@ -98,14 +98,19 @@ restart on both; a bad file is logged and the old config kept.
 - "Agent client" calls into an agent; "server client" calls into the server. Both send the raw token in the `Authorization` header.
 
 ### Scheduling: `pkg/scheduler`
-`LeastActive` is the only implementation and is hardcoded in `server.selectWorkers`. The `Scheduler` interface exists but nothing dispatches through it; greedy/roundrobin/epvm appear only in a commented-out `SelectWorkers` in `pkg/server/server.go`. Three phases:
 
-1. `SelectCandidateNodes`: keeps nodes that are `READY`, whose labels match the task (`checkLabels`: every task label
-   must be present and equal on the node), with at least one `READY` client, and, when `size` is set, where at least one
-   ready client has room (`hasRoomFor`). A node with no ready client is rejected with every client's reasons. Every
-   rejected node gets a `NodeRejection` with reasons.
-2. `Score`: base 100, +20 per client with zero active downloads, minus per-torrent penalties weighted by remaining progress and ETA.
-3. `PickN`: sort by score descending, take `task.MaxAllowedReplicas` nodes (default 1, capped at the candidate count).
+The task's `scheduler_type` picks the scheduler in `server.schedulerFor`: `least_active` (default, also when empty) or
+`round_robin`; anything else is `ErrUnknownType` and HTTP 400. Both implement `Scheduler` in three phases:
+
+1. `SelectCandidateNodes`: shared by both (`selectCandidates`). Keeps nodes that are `READY`, whose labels match the
+   task (`checkLabels`: every task label must be present and equal on the node), with at least one `READY` client,
+   and, when `size` is set, where at least one ready client has room (`hasRoomFor`). A node with no ready client is
+   rejected with every client's reasons. Every rejected node gets a `NodeRejection` with reasons.
+2. `Score`: `LeastActive` gives base 100, +20 per client with zero active downloads, minus per-torrent penalties
+   weighted by remaining progress and ETA. `RoundRobin` scores every node 0.
+3. `PickN`: take `task.MaxAllowedReplicas` nodes (default 1, capped at the candidate count). `LeastActive` sorts by
+   score descending. `RoundRobin` walks nodes in name order starting after the last node it picked; the server keeps
+   one shared `RoundRobin`, so the turn carries across tasks (in memory, reset on restart).
 
 ### Auth and config
 - One shared token. `pkg/middleware.IsAuthenticated` checks, in order, `X-API-Token`, the raw `Authorization` header (no `Bearer` scheme), then `?apikey=`. The first one present decides; no credential gives 401. Comparison is plain `!=`, not constant-time.

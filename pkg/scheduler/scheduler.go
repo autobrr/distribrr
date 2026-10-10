@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/autobrr/distribrr/pkg/node"
 	"github.com/autobrr/distribrr/pkg/stats"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/autobrr/go-qbittorrent"
 	"github.com/dustin/go-humanize"
+	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 )
 
@@ -23,10 +25,18 @@ const (
 	LIEB = 1.53960071783900203869
 )
 
+// Scheduler types a task can ask for in task.Task.SchedulerType.
+const (
+	TypeLeastActive = "least_active"
+	TypeRoundRobin  = "round_robin"
+)
+
+var ErrUnknownType = errors.New("unknown scheduler type")
+
 type Scheduler interface {
 	SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection)
 	Score(ctx context.Context, t task.Task, nodes []*node.Node) map[string]float64
-	Pick(scores map[string]float64, candidates []*node.Node) []*node.Node
+	PickN(scores map[string]float64, candidates []*node.Node, number int) []*node.Node
 }
 
 // NodeRejection records why a node was not selected as a candidate, so callers
@@ -36,12 +46,17 @@ type NodeRejection struct {
 	Reasons []string
 }
 
-type LeastActive struct {
-	Name       string
-	LastWorker int
-}
+// LeastActive picks the nodes with the fewest and furthest along active
+// downloads.
+type LeastActive struct{}
 
 func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection) {
+	return selectCandidates(ctx, t, nodes)
+}
+
+// selectCandidates keeps the nodes that can take the task and records why the
+// others cannot. Every scheduler shares it.
+func selectCandidates(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection) {
 	var candidates []*node.Node
 	var rejected []NodeRejection
 
@@ -206,34 +221,12 @@ func calculateTorrentPenalty(torrent qbittorrent.Torrent) float64 {
 	return progressPenalty + etaPenalty
 }
 
-func (r *LeastActive) Pick(scores map[string]float64, candidates []*node.Node) []*node.Node {
-	//var bestNodes []*node.Node
-	//for idx, candidate := range candidates {
-	//	n := candidate
-	//	if idx == 0 {
-	//		bestNodes = append(bestNodes, n)
-	//		continue
-	//	}
-	//}
-	//
-	//return bestNodes
-	return candidates
-}
-
 func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, number int) []*node.Node {
 	if len(candidates) == 0 {
 		return nil
 	}
 
-	// default to a single replica when the caller did not specify one
-	if number <= 0 {
-		number = 1
-	}
-
-	// never pick more nodes than we actually have
-	if number > len(candidates) {
-		number = len(candidates)
-	}
+	number = replicas(number, len(candidates))
 
 	// Create a ByScore instance
 	byScore := ByScore{
@@ -245,6 +238,72 @@ func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, 
 	sort.Sort(byScore)
 
 	return byScore.nodes[:number]
+}
+
+// replicas defaults an unset replica count to one and clamps it to the
+// candidates available.
+func replicas(number, candidates int) int {
+	if number <= 0 {
+		number = 1
+	}
+
+	return min(number, candidates)
+}
+
+// RoundRobin takes turns across nodes in name order. It remembers the last
+// node it picked, so it must be shared between tasks.
+type RoundRobin struct {
+	m    sync.Mutex
+	last string
+}
+
+func (r *RoundRobin) SelectCandidateNodes(ctx context.Context, t task.Task, nodes []*node.Node) ([]*node.Node, []NodeRejection) {
+	return selectCandidates(ctx, t, nodes)
+}
+
+// Score gives every node the same score; the turn order decides.
+func (r *RoundRobin) Score(ctx context.Context, t task.Task, nodes []*node.Node) map[string]float64 {
+	scores := make(map[string]float64, len(nodes))
+	for _, n := range nodes {
+		scores[n.Name] = 0
+	}
+
+	return scores
+}
+
+// PickN picks number nodes, starting after the last node picked. The turn
+// is kept by name rather than index, so nodes coming and going do not reset
+// it or skip a node.
+func (r *RoundRobin) PickN(scores map[string]float64, candidates []*node.Node, number int) []*node.Node {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	number = replicas(number, len(candidates))
+
+	sorted := slices.Clone(candidates)
+	slices.SortFunc(sorted, func(a, b *node.Node) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	r.m.Lock()
+	defer r.m.Unlock()
+
+	start := slices.IndexFunc(sorted, func(n *node.Node) bool {
+		return n.Name > r.last
+	})
+	if start < 0 {
+		start = 0
+	}
+
+	picked := make([]*node.Node, 0, number)
+	for i := range number {
+		picked = append(picked, sorted[(start+i)%len(sorted)])
+	}
+
+	r.last = picked[len(picked)-1].Name
+
+	return picked
 }
 
 // ByScore implements sort.Interface based on the score map
