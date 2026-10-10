@@ -34,12 +34,16 @@ jobs:
           cache: true
 
       - name: Test
-        run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- ./... -tags=integration
+        run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- $(go list ./... | grep -v /internal/testharness/scenarios) -tags=integration
+
+      # in-process server + agents against fake qBittorrent and tracker; see internal/testharness
+      - name: Integration tests
+        run: go run gotest.tools/gotestsum@latest --junitfile integration-tests.xml --format pkgname -- -race -count=1 ./internal/testharness/scenarios/...
 
       - name: Test Summary
         uses: test-summary/action@v2
         with:
-          paths: "unit-tests.xml"
+          paths: "*-tests.xml"
         if: always()
 
   goreleaserbuild:

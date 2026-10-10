@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
+	"net"
 	"os"
 	"os/signal"
 	"slices"
@@ -26,7 +28,14 @@ import (
 // shutdownTimeout bounds how long in-flight requests get to finish on shutdown.
 const shutdownTimeout = 30 * time.Second
 
+// defaultHealthCheckInterval is the default Service.HealthCheckInterval.
+const defaultHealthCheckInterval = 10 * time.Second
+
 type Service struct {
+	// HealthCheckInterval is how often Serve health checks the nodes. Set it
+	// before calling Serve.
+	HealthCheckInterval time.Duration
+
 	cfg         *Config
 	workerNodes []*node.Node
 	m           sync.RWMutex
@@ -36,6 +45,8 @@ type Service struct {
 
 func NewService(cfg *Config) *Service {
 	s := &Service{
+		HealthCheckInterval: defaultHealthCheckInterval,
+
 		cfg:         cfg,
 		workerNodes: make([]*node.Node, 0),
 		log:         log.Logger.With().Str("module", "server").Logger(),
@@ -45,7 +56,7 @@ func NewService(cfg *Config) *Service {
 	s.m.Lock()
 	for _, w := range cfg.Nodes {
 		if w != nil {
-			s.workerNodes = append(s.workerNodes, node.NewNode(w.Name, w.Addr, w.Token, "worker"))
+			s.workerNodes = append(s.workerNodes, newWorkerNode(w))
 		}
 	}
 	s.m.Unlock()
@@ -53,44 +64,108 @@ func NewService(cfg *Config) *Service {
 	return s
 }
 
+// Run serves on the configured host and port until SIGINT, SIGQUIT or SIGTERM,
+// then shuts down gracefully. SIGHUP reloads the config.
+// newWorkerNode builds the node for a config entry, with the labels it was
+// saved with.
+func newWorkerNode(entry *AgentNode) *node.Node {
+	n := node.NewNode(entry.Name, entry.Addr, entry.Token, "worker")
+	if entry.Labels != nil {
+		n.SetLabels(entry.Labels)
+	}
+
+	return n
+}
+
 func (s *Service) Run() error {
+	addr := net.JoinHostPort(s.cfg.Http.Host, s.cfg.Http.Port)
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return errors.Wrapf(err, "could not open listener on: %s", addr)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 
 	// SIGHUP reloads the config instead of shutting down
-	reload := make(chan os.Signal, 1)
-	signal.Notify(reload, syscall.SIGHUP)
-	defer signal.Stop(reload)
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
+	reload := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				log.Info().Msg("got SIGHUP")
+				select {
+				case reload <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return s.Serve(ctx, ln, reload)
+}
+
+// Serve runs the server on ln, along with the node health checks, until ctx
+// is done or the http server fails. A value on reload reloads the config; a
+// failed reload is logged and the current config kept. reload may be nil.
+// When ctx is done in-flight requests get up to shutdownTimeout to finish and
+// Serve returns nil. ln is closed when Serve returns.
+func (s *Service) Serve(ctx context.Context, ln net.Listener, reload <-chan struct{}) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	srv := NewAPIServer(s.cfg, s)
 
 	errorChannel := make(chan error, 1)
 	go func() {
-		errorChannel <- srv.Open()
+		errorChannel <- srv.Serve(ln)
 	}()
 
-	go s.HealthChecks(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		s.HealthChecks(ctx)
+	})
+
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
 
 	for running := true; running; {
 		select {
 		case err := <-errorChannel:
 			return errors.Wrap(err, "http server stopped")
 		case <-reload:
-			log.Info().Msg("got SIGHUP, reloading config")
+			log.Info().Msg("reloading config")
 			if err := s.Reload(); err != nil {
 				log.Error().Err(err).Msg("could not reload config, keeping current config")
 			}
 		case <-ctx.Done():
-			log.Info().Msg("got signal, shutting down server")
+			log.Info().Msg("shutting down server")
 			running = false
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelShutdown()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return errors.Wrap(err, "could not shut down http server")
+	shutdownErr := srv.Shutdown(shutdownCtx)
+
+	// Serve returns right after Shutdown starts; wait for it so ln is closed
+	if err := <-errorChannel; err != nil {
+		return errors.Wrap(err, "http server stopped")
+	}
+
+	if shutdownErr != nil {
+		return errors.Wrap(shutdownErr, "could not shut down http server")
 	}
 
 	return nil
@@ -144,7 +219,7 @@ func (s *Service) Reload() error {
 		})
 
 		if idx < 0 {
-			s.workerNodes = append(s.workerNodes, node.NewNode(entry.Name, entry.Addr, entry.Token, "worker"))
+			s.workerNodes = append(s.workerNodes, newWorkerNode(entry))
 			added++
 
 			s.log.Debug().Msgf("reload: added node %s %s", entry.Name, entry.Addr)
@@ -153,8 +228,14 @@ func (s *Service) Reload() error {
 		}
 
 		workerNode := s.workerNodes[idx]
-		if workerNode.Addr() != entry.Addr || workerNode.Token() != entry.Token {
-			workerNode.Update(entry.Addr, entry.Token, workerNode.Labels())
+		// an entry without labels keeps the ones the node already has
+		labels := entry.Labels
+		if labels == nil {
+			labels = workerNode.Labels()
+		}
+
+		if workerNode.Addr() != entry.Addr || workerNode.Token() != entry.Token || !maps.Equal(workerNode.Labels(), labels) {
+			workerNode.Update(entry.Addr, entry.Token, labels)
 			updated++
 
 			s.log.Debug().Msgf("reload: updated node %s %s", entry.Name, entry.Addr)
@@ -211,7 +292,7 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 	})
 
 	// persist first so memory never holds a node the config file does not
-	if err := s.saveNodeToConfig(req.NodeName, req.ClientAddr, req.AgentToken); err != nil {
+	if err := s.saveNodeToConfig(req.NodeName, req.ClientAddr, req.AgentToken, req.Labels); err != nil {
 		l.Error().Err(err).Msgf("could not write node to config")
 		return err
 	}
@@ -236,21 +317,22 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 // saveNodeToConfig adds or updates the config entry for nodeName and writes
 // the config file. Nothing is written when the entry is already up to date.
 // s.cfg.Nodes is only changed after a successful write. Callers hold s.m.
-func (s *Service) saveNodeToConfig(nodeName string, clientAddr string, token string) error {
+func (s *Service) saveNodeToConfig(nodeName string, clientAddr string, token string, labels map[string]string) error {
 	idx := slices.IndexFunc(s.cfg.Nodes, func(n *AgentNode) bool {
 		return n != nil && n.Name == nodeName
 	})
 
-	if idx >= 0 && s.cfg.Nodes[idx].Addr == clientAddr && s.cfg.Nodes[idx].Token == token {
+	if idx >= 0 && s.cfg.Nodes[idx].Addr == clientAddr && s.cfg.Nodes[idx].Token == token && maps.Equal(s.cfg.Nodes[idx].Labels, labels) {
 		return nil
 	}
 
 	log.Debug().Msgf("save node to config: %s %s", nodeName, clientAddr)
 
 	entry := &AgentNode{
-		Name:  nodeName,
-		Addr:  clientAddr,
-		Token: token,
+		Name:   nodeName,
+		Addr:   clientAddr,
+		Token:  token,
+		Labels: labels,
 	}
 
 	nodes := slices.Clone(s.cfg.Nodes)
@@ -291,10 +373,9 @@ func (s *Service) GetNodes() []*node.Node {
 	return s.workerNodes
 }
 
+// HealthChecks checks every node each HealthCheckInterval until ctx is done.
 func (s *Service) HealthChecks(ctx context.Context) {
-	tickerDuration := time.Second * 10
-
-	ticker := time.NewTicker(tickerDuration)
+	ticker := time.NewTicker(s.HealthCheckInterval)
 	defer ticker.Stop()
 
 	for {

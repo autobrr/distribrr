@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/xid"
-	"github.com/rs/zerolog"
 )
 
 func IsAuthenticated(apiKey string) func(next http.Handler) http.Handler {
@@ -151,10 +150,11 @@ func RequestLogger(next http.Handler) http.Handler {
 		//	return c.Str("correlation_id", correlationID)
 		//})
 
+		// With copies the context; UpdateContext would append to the backing
+		// array the shared logger.Get() value hands every request, racing
+		// with concurrent requests
 		if id := r.Context().Value(CorrelationIDCtxKey).(string); id != "" {
-			l.UpdateContext(func(c zerolog.Context) zerolog.Context {
-				return c.Str(CorrelationIDCtxKey, id)
-			})
+			l = l.With().Str(CorrelationIDCtxKey, id).Logger()
 		}
 
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)

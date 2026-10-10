@@ -14,6 +14,9 @@ type AgentNode struct {
 	Name  string
 	Addr  string
 	Token string
+	// Labels are the labels the agent registered with, kept so the scheduler
+	// has them after a restart without asking the agent.
+	Labels map[string]string `yaml:"labels,omitempty"`
 }
 
 type Config struct {

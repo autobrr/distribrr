@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
@@ -70,22 +71,25 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 			continue
 		}
 
-		var clientReasons []string
-		for _, clientStats := range stat.ClientStats {
-			if clientStats.Status != stats.ClientStatusReady {
+		// the agent only adds the torrent to its ready clients with room, so
+		// the node needs one such client, not all of them
+		ready := readyClients(stat.ClientStats)
+		if len(ready) == 0 {
+			var clientReasons []string
+			for _, clientStats := range stat.ClientStats {
 				clientReasons = append(clientReasons, fmt.Sprintf("client %s: %s", clientStats.Name, formatReasons(clientStats.Reasons)))
 			}
-		}
+			if len(clientReasons) == 0 {
+				clientReasons = []string{"no clients"}
+			}
+			slices.Sort(clientReasons)
 
-		if len(clientReasons) > 0 {
 			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: clientReasons})
 			continue
 		}
 
-		// the agent adds the torrent to every client with room, so the node
-		// only needs one client that fits
-		if !hasRoomFor(stat.ClientStats, t.Size) {
-			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("no client has room for %s", humanize.Bytes(t.Size))}})
+		if !hasRoomFor(ready, t.Size) {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("no ready client has room for %s", humanize.Bytes(t.Size))}})
 			continue
 		}
 
@@ -93,6 +97,18 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 	}
 
 	return candidates, rejected
+}
+
+// readyClients returns the clients that report READY.
+func readyClients(clients map[string]stats.ClientStats) map[string]stats.ClientStats {
+	ready := make(map[string]stats.ClientStats, len(clients))
+	for name, c := range clients {
+		if c.Status == stats.ClientStatusReady {
+			ready[name] = c
+		}
+	}
+
+	return ready
 }
 
 // hasRoomFor reports whether at least one client has storage room for a torrent

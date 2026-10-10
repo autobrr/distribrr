@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/autobrr/distribrr/pkg/stats"
@@ -85,4 +86,23 @@ func TestNode_concurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestNode_GetLabels_cachesFetchedLabels(t *testing.T) {
+	var fetches atomic.Int32
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		json.NewEncoder(w).Encode(map[string]string{"region": "eu"})
+	}))
+	defer agentSrv.Close()
+
+	n := NewNode("node1", agentSrv.URL, "token", "worker")
+
+	for range 3 {
+		labels, err := n.GetLabels(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"region": "eu"}, labels)
+	}
+
+	assert.Equal(t, int32(1), fetches.Load())
 }

@@ -308,7 +308,7 @@ func TestLeastActive_SelectCandidateNodes_size(t *testing.T) {
 
 	candidates, rejected = r.SelectCandidateNodes(t.Context(), task.Task{Size: 50 * gb}, []*node.Node{newNode()})
 	assert.Empty(t, candidates)
-	assert.Equal(t, []NodeRejection{{Node: "node1", Reasons: []string{"no client has room for 50 GB"}}}, rejected)
+	assert.Equal(t, []NodeRejection{{Node: "node1", Reasons: []string{"no ready client has room for 50 GB"}}}, rejected)
 }
 
 // testNode builds a node with cached labels and stats, so the scheduler does
@@ -318,6 +318,62 @@ func testNode(name string, status node.Status, labels map[string]string, st stat
 	n.SetStatus(status)
 	n.SetLabels(labels)
 	n.SetStats(st)
+
+	return n
+}
+
+func TestLeastActive_SelectCandidateNodes_partiallyReady(t *testing.T) {
+	const gb = 1_000_000_000
+
+	newAgent := func(clients map[string]stats.ClientStats) *node.Node {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(stats.Stats{MemStats: &linux.MemInfo{}, DiskStats: &linux.Disk{}, ClientStats: clients})
+		}))
+		t.Cleanup(srv.Close)
+
+		return testNodeAt(srv.URL, "node1")
+	}
+
+	busy := stats.ClientStats{Name: "busy", Status: stats.ClientStatusNotReady, Reasons: []stats.NotReadyReason{stats.ReasonMaxDownloadsReached}}
+	down := stats.ClientStats{Name: "down", Status: stats.ClientStatusNotReady, Reasons: []stats.NotReadyReason{stats.ReasonClientUnreachable}}
+	small := stats.ClientStats{Name: "small", Status: stats.ClientStatusReady, StorageHeadroom: new(uint64(1 * gb))}
+	idle := stats.ClientStats{Name: "idle", Status: stats.ClientStatusReady}
+
+	r := &LeastActive{}
+
+	t.Run("one ready client is enough", func(t *testing.T) {
+		n := newAgent(map[string]stats.ClientStats{"busy": busy, "idle": idle})
+
+		candidates, rejected := r.SelectCandidateNodes(t.Context(), task.Task{}, []*node.Node{n})
+		assert.Len(t, candidates, 1)
+		assert.Empty(t, rejected)
+	})
+
+	t.Run("no ready client lists every client's reasons", func(t *testing.T) {
+		n := newAgent(map[string]stats.ClientStats{"busy": busy, "down": down})
+
+		candidates, rejected := r.SelectCandidateNodes(t.Context(), task.Task{}, []*node.Node{n})
+		assert.Empty(t, candidates)
+		assert.Equal(t, []NodeRejection{{Node: "node1", Reasons: []string{
+			"client busy: max_downloads_reached",
+			"client down: client_unreachable",
+		}}}, rejected)
+	})
+
+	t.Run("room only counts on ready clients", func(t *testing.T) {
+		// "busy" has no storage rules, so it would fit anything, but it is not ready
+		n := newAgent(map[string]stats.ClientStats{"busy": busy, "small": small})
+
+		candidates, rejected := r.SelectCandidateNodes(t.Context(), task.Task{Size: 5 * gb}, []*node.Node{n})
+		assert.Empty(t, candidates)
+		assert.Equal(t, []NodeRejection{{Node: "node1", Reasons: []string{"no ready client has room for 5.0 GB"}}}, rejected)
+	})
+}
+
+func testNodeAt(addr string, name string) *node.Node {
+	n := node.NewNode(name, addr, "token", "worker")
+	n.SetStatus(node.StatusReady)
+	n.SetLabels(map[string]string{})
 
 	return n
 }

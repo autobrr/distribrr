@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"net"
 	"os"
 	"os/signal"
 	"reflect"
@@ -31,12 +32,31 @@ import (
 // shutdownTimeout bounds how long deregistering and in-flight requests get on shutdown.
 const shutdownTimeout = 30 * time.Second
 
-// registerInterval is how often Register retries joining the server, and how
-// long a single join attempt may take.
-const registerInterval = 10 * time.Second
+// Defaults for the Service timing fields.
+const (
+	defaultRegisterInterval      = 10 * time.Second
+	defaultDirUsageInterval      = time.Minute
+	defaultReannounceInterval    = 7
+	defaultReannounceMaxAttempts = 50
+)
 
 type Service struct {
-	// m guards cfg, clients, serverClient and controlNode. reload swaps cfg and
+	// Timings. NewService sets the defaults; change them before calling Serve.
+
+	// RegisterInterval is how often Register retries joining the server, and
+	// how long a single join attempt may take.
+	RegisterInterval time.Duration
+	// DirUsageInterval is how often the storage paths with a maxUsage rule are
+	// walked. Walking a large torrent directory is slow, so it runs in the
+	// background and /stats only reads the last result.
+	DirUsageInterval time.Duration
+	// ReannounceInterval is the number of seconds between re-announce attempts
+	// after a torrent is added.
+	ReannounceInterval int
+	// ReannounceMaxAttempts is how many times a torrent is re-announced at most.
+	ReannounceMaxAttempts int
+
+	// m guards cfg, clients, serverClient, controlNode and serveCtx. reload swaps cfg and
 	// clients for new values instead of changing them in place, so readers can
 	// keep using what they got after releasing the lock.
 	m   sync.RWMutex
@@ -47,6 +67,9 @@ type Service struct {
 	dirUsage    dirUsageCache
 
 	serverClient *serverclient.Client
+
+	// serveCtx is the ctx of the running Serve, see baseContext.
+	serveCtx context.Context
 
 	// reloadM serializes reloads and guards the dir usage loop fields.
 	reloadM          sync.Mutex
@@ -61,6 +84,11 @@ type controlNode struct {
 
 func NewService(cfg *Config) *Service {
 	s := &Service{
+		RegisterInterval:      defaultRegisterInterval,
+		DirUsageInterval:      defaultDirUsageInterval,
+		ReannounceInterval:    defaultReannounceInterval,
+		ReannounceMaxAttempts: defaultReannounceMaxAttempts,
+
 		cfg:     cfg,
 		clients: buildClients(cfg),
 	}
@@ -72,7 +100,17 @@ func NewService(cfg *Config) *Service {
 	return s
 }
 
+// Run serves on the configured host and port until SIGINT, SIGQUIT or SIGTERM,
+// then deregisters and shuts down gracefully. SIGHUP reloads the config.
 func (s *Service) Run() error {
+	cfg := s.config()
+	addr := net.JoinHostPort(cfg.Http.Host, cfg.Http.Port)
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return errors.Wrapf(err, "could not open listener on: %s", addr)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 
@@ -80,7 +118,47 @@ func (s *Service) Run() error {
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 
+	reload := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				log.Info().Msg("got SIGHUP")
+				select {
+				case reload <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return s.Serve(ctx, ln, reload)
+}
+
+// Serve runs the agent on ln until ctx is done or the http server fails. It
+// registers with the server in the background and keeps the dir usage of
+// maxUsage paths measured. A value on reload reloads the config; a failed
+// reload is logged and the current config kept. reload may be nil.
+// When ctx is done the agent deregisters first, so the server stops sending
+// tasks, then in-flight requests get the rest of shutdownTimeout to finish.
+// Serve returns nil on a clean shutdown. ln is closed when Serve returns.
+func (s *Service) Serve(ctx context.Context, ln net.Listener, reload <-chan struct{}) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	s.m.Lock()
+	s.serveCtx = ctx
+	s.m.Unlock()
+
 	srv := NewAPIServer(s.config(), s)
+
+	errorChannel := make(chan error, 1)
+	go func() {
+		errorChannel <- srv.Serve(ln)
+	}()
 
 	// register agent with server
 	go s.Register(ctx)
@@ -90,17 +168,12 @@ func (s *Service) Run() error {
 	s.watchDirUsage(ctx, s.dirUsagePaths())
 	s.reloadM.Unlock()
 
-	errorChannel := make(chan error, 1)
-	go func() {
-		errorChannel <- srv.Open()
-	}()
-
 	for ctx.Err() == nil {
 		select {
 		case err := <-errorChannel:
 			return errors.Wrap(err, "http server stopped")
-		case <-hup:
-			log.Info().Msg("got SIGHUP, reloading config")
+		case <-reload:
+			log.Info().Msg("reloading config")
 			if err := s.reload(ctx); err != nil {
 				log.Error().Err(err).Msg("could not reload config, keeping the current config")
 			}
@@ -108,16 +181,23 @@ func (s *Service) Run() error {
 		}
 	}
 
-	log.Info().Msg("got signal, shutting down agent")
+	log.Info().Msg("shutting down agent")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelShutdown()
 
 	// deregister first so the server stops sending tasks while in-flight ones finish
 	deregisterErr := s.Deregister(shutdownCtx)
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return errors.Wrap(err, "could not shut down http server")
+	shutdownErr := srv.Shutdown(shutdownCtx)
+
+	// Serve returns right after Shutdown starts; wait for it so ln is closed
+	if err := <-errorChannel; err != nil {
+		return errors.Wrap(err, "http server stopped")
+	}
+
+	if shutdownErr != nil {
+		return errors.Wrap(shutdownErr, "could not shut down http server")
 	}
 
 	if deregisterErr != nil {
@@ -125,6 +205,20 @@ func (s *Service) Run() error {
 	}
 
 	return nil
+}
+
+// baseContext returns the ctx of the running Serve, or context.Background()
+// when Serve has not been called. Work that outlives a request, like
+// re-announcing, stops when it is done.
+func (s *Service) baseContext() context.Context {
+	s.m.RLock()
+	defer s.m.RUnlock()
+
+	if s.serveCtx == nil {
+		return context.Background()
+	}
+
+	return s.serveCtx
 }
 
 // config returns the current config. It is replaced, never changed, on reload,
@@ -261,7 +355,7 @@ func (s *Service) watchDirUsage(ctx context.Context, paths []string) {
 	s.dirUsageCancel = cancel
 	s.dirUsageWatching = paths
 
-	go s.dirUsage.run(ctx, paths, dirUsageInterval)
+	go s.dirUsage.run(ctx, paths, s.DirUsageInterval)
 }
 
 func sameElements(a, b []string) bool {
@@ -275,11 +369,11 @@ func sameElements(a, b []string) bool {
 // Register joins the server, retrying until it succeeds or ctx is done. Every
 // attempt reads the current config, so a reload applies to the next attempt.
 func (s *Service) Register(ctx context.Context) {
-	if err := s.registerAgentWithServer(ctx, registerInterval); err != nil {
+	if err := s.registerAgentWithServer(ctx, s.RegisterInterval); err != nil {
 		log.Error().Err(err).Msgf("could not register agent and join server: %s", s.config().Manager.Addr)
 	}
 
-	ticker := time.NewTicker(registerInterval)
+	ticker := time.NewTicker(s.RegisterInterval)
 	defer ticker.Stop()
 
 	for !s.joined() {
@@ -287,7 +381,7 @@ func (s *Service) Register(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.registerAgentWithServer(ctx, registerInterval); err != nil {
+			if err := s.registerAgentWithServer(ctx, s.RegisterInterval); err != nil {
 				log.Error().Err(err).Msgf("could not register agent and join server: %s", s.config().Manager.Addr)
 			}
 		}
@@ -447,12 +541,10 @@ func (s *Service) StartTask(t task.Task) error {
 		opts["tags"] = t.Tags
 	}
 
-	// when the caller sent a size, reject before fetching the .torrent if no
-	// client has room for it
-	if t.Size > 0 {
-		if _, err := s.clientsWithRoom(ctx, t.Size); err != nil {
-			return err
-		}
+	// reject before fetching the .torrent if no client is ready, or none has
+	// room for the size the caller sent
+	if _, err := s.readyClients(ctx, t.Size); err != nil {
+		return err
 	}
 
 	rel := domain.NewRelease(t.DownloadURL, t.Name, t.Indexer)
@@ -466,7 +558,7 @@ func (s *Service) StartTask(t task.Task) error {
 		size = t.Size
 	}
 
-	clients, err := s.clientsWithRoom(ctx, size)
+	clients, err := s.readyClients(ctx, size)
 	if err != nil {
 		return err
 	}
@@ -477,8 +569,9 @@ func (s *Service) StartTask(t task.Task) error {
 
 			// TODO read from memory
 
-			// send downloads
-			if _, err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, opts); err != nil {
+			// send downloads; go-qbittorrent writes to the options map, so
+			// every client gets its own copy
+			if _, err := client.Client.AddTorrentFromUrlCtx(ctx, t.DownloadURL, maps.Clone(opts)); err != nil {
 				log.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
 				return err
 			}
@@ -490,12 +583,12 @@ func (s *Service) StartTask(t task.Task) error {
 
 					// reannounce
 					options := qbittorrent.ReannounceOptions{
-						Interval:        7,
-						MaxAttempts:     50,
+						Interval:        s.ReannounceInterval,
+						MaxAttempts:     s.ReannounceMaxAttempts,
 						DeleteOnFailure: false,
 					}
 
-					if err := client.Client.ReannounceTorrentWithRetry(context.Background(), hash, &options); err != nil {
+					if err := client.Client.ReannounceTorrentWithRetry(s.baseContext(), hash, &options); err != nil {
 						log.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", hash, clientName)
 						return
 					}
@@ -520,38 +613,62 @@ func (s *Service) StartTask(t task.Task) error {
 	return nil
 }
 
-// ErrInsufficientStorage is returned by StartTask when no client has room for
-// the torrent under its storage rules.
+// ErrInsufficientStorage is returned by StartTask when no ready client has
+// room for the torrent.
 var ErrInsufficientStorage = errors.New("insufficient storage")
 
-// clientsWithRoom returns the clients whose storage rules have room for a
-// torrent of size bytes. With an unknown size (0) every client is returned. It
-// returns ErrInsufficientStorage when no client has room.
-func (s *Service) clientsWithRoom(ctx context.Context, size uint64) ([]*QbitClient, error) {
-	if size == 0 {
-		return slices.Collect(maps.Values(s.getClients())), nil
-	}
+// ErrNoReadyClients is returned by StartTask when no client is ready, e.g. all
+// are at their max active downloads, out of disk or unreachable.
+var ErrNoReadyClients = errors.New("no ready clients")
 
-	var clients []*QbitClient
-	var skipped []string
+// readyClients returns the clients that are READY and, for a known size, whose
+// storage rules have room for a torrent of size bytes. It returns
+// ErrNoReadyClients when no client is ready and ErrInsufficientStorage when no
+// ready client has room.
+func (s *Service) readyClients(ctx context.Context, size uint64) ([]*QbitClient, error) {
+	var ready []*QbitClient
+	var notReady []string
+	var noRoom []string
 
 	for _, client := range s.getClients() {
 		ct := s.clientStats(ctx, client, map[string]*linux.Disk{})
 
-		if !ct.HasRoomFor(size) {
-			log.Debug().Msgf("client %s has no room for %s (headroom %s)", client.Name, humanize.Bytes(size), humanize.Bytes(*ct.StorageHeadroom))
-			skipped = append(skipped, fmt.Sprintf("%s: %s room", client.Name, humanize.Bytes(*ct.StorageHeadroom)))
+		if ct.Status != stats.ClientStatusReady {
+			notReady = append(notReady, fmt.Sprintf("%s: %s", client.Name, joinReasons(ct.Reasons)))
 			continue
 		}
 
-		clients = append(clients, client)
+		if !ct.HasRoomFor(size) {
+			log.Debug().Msgf("client %s has no room for %s (headroom %s)", client.Name, humanize.Bytes(size), humanize.Bytes(*ct.StorageHeadroom))
+			noRoom = append(noRoom, fmt.Sprintf("%s: %s room", client.Name, humanize.Bytes(*ct.StorageHeadroom)))
+			continue
+		}
+
+		ready = append(ready, client)
 	}
 
-	if len(clients) == 0 {
-		return nil, errors.Wrapf(ErrInsufficientStorage, "no client has room for %s (%s)", humanize.Bytes(size), strings.Join(skipped, ", "))
+	if len(ready) > 0 {
+		return ready, nil
 	}
 
-	return clients, nil
+	if len(noRoom) > 0 {
+		return nil, errors.Wrapf(ErrInsufficientStorage, "no client has room for %s (%s)", humanize.Bytes(size), strings.Join(append(noRoom, notReady...), ", "))
+	}
+
+	return nil, errors.Wrapf(ErrNoReadyClients, "no client is ready (%s)", strings.Join(notReady, ", "))
+}
+
+func joinReasons(reasons []stats.NotReadyReason) string {
+	if len(reasons) == 0 {
+		return "not ready"
+	}
+
+	parts := make([]string, len(reasons))
+	for i, reason := range reasons {
+		parts[i] = string(reason)
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 func (s *Service) StopTask(t task.Task) {
@@ -641,8 +758,10 @@ func (s *Service) clientStats(ctx context.Context, client *QbitClient, diskPaths
 
 	// a client is at capacity once it reaches its max active downloads, but
 	// we still allow it through if one of those downloads is nearly finished.
-	downloadsOK := len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads
-	if !downloadsOK && len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
+	// A limit of 0 means unlimited.
+	maxActive := client.Rules.Torrents.MaxActiveDownloads
+	downloadsOK := maxActive == 0 || len(activeDownloads) < maxActive
+	if !downloadsOK && len(activeDownloads) == maxActive {
 		l.Debug().Msgf("max active downloads (%d) reached, checking individual torrents...", client.Rules.Torrents.MaxActiveDownloads)
 
 		for _, torrent := range activeDownloads {
@@ -794,11 +913,6 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, reserved uint64, diskPa
 
 	return reasons, &headroom
 }
-
-// dirUsageInterval is how often the storage paths with a maxUsage rule are
-// walked. Walking a large torrent directory is slow, so it runs in the
-// background and /stats only reads the last result.
-const dirUsageInterval = time.Minute
 
 // errDirUsagePending means a path has not been measured yet, because the first
 // background walk is still running.

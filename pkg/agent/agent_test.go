@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -274,7 +275,7 @@ func newRoomService(t *testing.T, room uint64, amountLeft int64, preallocate boo
 	return NewService(cfg)
 }
 
-func TestService_clientsWithRoom(t *testing.T) {
+func TestService_readyClients(t *testing.T) {
 	const mb = 1_000_000
 
 	tests := []struct {
@@ -296,7 +297,7 @@ func TestService_clientsWithRoom(t *testing.T) {
 			// 500MB of room leaves slack for other writes to the temp filesystem
 			s := newRoomService(t, 500*mb, tt.amountLeft, tt.preallocate)
 
-			clients, err := s.clientsWithRoom(t.Context(), tt.size)
+			clients, err := s.readyClients(t.Context(), tt.size)
 			if tt.wantErr {
 				assert.ErrorIs(t, err, ErrInsufficientStorage)
 				assert.Empty(t, clients)
@@ -479,9 +480,7 @@ func TestService_reload_concurrentReads(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for ctx.Err() == nil {
-				clients, err := s.clientsWithRoom(ctx, 0)
-				assert.NoError(t, err)
-				for _, c := range clients {
+				for _, c := range s.getClients() {
 					_ = c.Rules.Torrents.MaxActiveDownloads
 				}
 				_ = s.GetLabels()
@@ -596,4 +595,118 @@ clients:
 	require.NoError(t, s.reload(t.Context()))
 	joins, _ = manager.requests()
 	assert.Len(t, joins, 3)
+}
+
+// serve runs s.Serve on a random local port and returns its base url, the
+// reload channel and a func that cancels ctx and returns Serve's error. The
+// test cleanup stops it too.
+func serve(t *testing.T, s *Service) (string, chan<- struct{}, func() error) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	reload := make(chan struct{})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Serve(ctx, ln, reload)
+	}()
+
+	stop := sync.OnceValue(func() error {
+		cancel()
+
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not return after ctx was cancelled")
+			return nil
+		}
+	})
+	t.Cleanup(func() { stop() })
+
+	return "http://" + ln.Addr().String(), reload, stop
+}
+
+func TestService_Serve(t *testing.T) {
+	s := NewService(NewConfig())
+
+	url, _, stop := serve(t, s)
+
+	resp, err := http.Get(url + "/api/v1/healthz/liveness")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.NoError(t, stop())
+
+	// the listener is closed
+	_, err = http.Get(url + "/api/v1/healthz/liveness")
+	assert.Error(t, err)
+}
+
+func TestService_Serve_reload(t *testing.T) {
+	s, path := newReloadService(t, clientConfig("a", ""))
+
+	_, reload, stop := serve(t, s)
+
+	writeFile(t, path, clientConfig("b", ""))
+	reload <- struct{}{}
+
+	require.Eventually(t, func() bool {
+		_, ok := s.getClients()["b"]
+		return ok
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, stop())
+}
+
+func TestService_Serve_deregistersOnShutdown(t *testing.T) {
+	var (
+		m     sync.Mutex
+		calls []string
+	)
+
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "server-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		m.Lock()
+		calls = append(calls, r.URL.Path)
+		m.Unlock()
+
+		switch r.URL.Path {
+		case "/api/v1/node/register":
+			w.WriteHeader(http.StatusCreated)
+		case "/api/v1/node/deregister":
+			var req serverclient.DeregisterRequest
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "agent1", req.NodeName)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(manager.Close)
+
+	cfg := NewConfig()
+	cfg.Agent.NodeName = "agent1"
+	cfg.Manager = Manager{Addr: manager.URL, Token: "server-token"}
+
+	s := NewService(cfg)
+	s.RegisterInterval = 50 * time.Millisecond
+
+	_, _, stop := serve(t, s)
+
+	require.Eventually(t, s.joined, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, stop())
+
+	m.Lock()
+	defer m.Unlock()
+	assert.Equal(t, []string{"/api/v1/node/register", "/api/v1/node/deregister"}, calls)
 }
