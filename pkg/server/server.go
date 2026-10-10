@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"slices"
 	"strings"
@@ -22,6 +21,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
+
+// shutdownTimeout bounds how long in-flight requests get to finish on shutdown.
+const shutdownTimeout = 30 * time.Second
 
 type Service struct {
 	cfg         *Config
@@ -51,6 +53,9 @@ func NewService(cfg *Config) *Service {
 }
 
 func (s *Service) Run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	defer stop()
+
 	srv := NewAPIServer(s.cfg, s)
 
 	errorChannel := make(chan error, 1)
@@ -58,17 +63,20 @@ func (s *Service) Run() error {
 		errorChannel <- srv.Open()
 	}()
 
-	go s.HealthChecks()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
+	go s.HealthChecks(ctx)
 
 	select {
 	case err := <-errorChannel:
 		return errors.Wrap(err, "http server stopped")
-	case sig := <-sigCh:
-		log.Info().Msgf("got signal %q, shutting down server", sig)
-		os.Exit(0)
+	case <-ctx.Done():
+		log.Info().Msg("got signal, shutting down server")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return errors.Wrap(err, "could not shut down http server")
 	}
 
 	return nil
@@ -195,7 +203,7 @@ func (s *Service) GetNodes() []*node.Node {
 	return s.workerNodes
 }
 
-func (s *Service) HealthChecks() {
+func (s *Service) HealthChecks(ctx context.Context) {
 	tickerDuration := time.Second * 10
 
 	ticker := time.NewTicker(tickerDuration)
@@ -203,9 +211,9 @@ func (s *Service) HealthChecks() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
-			ctx := context.Background()
-
 			if err := s.healthChecks(ctx); err != nil {
 				s.log.Error().Err(err).Msg("health checks failed")
 			}

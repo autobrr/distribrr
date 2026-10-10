@@ -23,15 +23,22 @@ type APIServer struct {
 	token string
 
 	service *Service
+	server  *http.Server
 }
 
 func NewAPIServer(cfg *Config, svc *Service) *APIServer {
-	return &APIServer{
+	s := &APIServer{
 		host:    cfg.Http.Host,
 		port:    cfg.Http.Port,
 		token:   cfg.Http.Token,
 		service: svc,
 	}
+
+	s.server = &http.Server{
+		Handler: s.Handler(),
+	}
+
+	return s
 }
 
 func (s *APIServer) Open() error {
@@ -42,13 +49,18 @@ func (s *APIServer) Open() error {
 		return errors.Wrapf(err, "could not open listener on: %s", addr)
 	}
 
-	server := http.Server{
-		Handler: s.Handler(),
-	}
-
 	log.Info().Msgf("listening on: %s", listener.Addr())
 
-	return server.Serve(listener)
+	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+
+	return nil
+}
+
+// Shutdown stops accepting new connections and waits for in-flight requests until ctx is done.
+func (s *APIServer) Shutdown(ctx context.Context) error {
+	return s.server.Shutdown(ctx)
 }
 
 func (s *APIServer) Handler() http.Handler {

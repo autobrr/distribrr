@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/autobrr/distribrr/pkg/scheduler"
 
@@ -64,4 +65,26 @@ func TestService_removeNodeFromConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "node1")
 	assert.Contains(t, string(data), "node2")
+}
+
+func TestAPIServer_Shutdown(t *testing.T) {
+	cfg := NewConfig()
+	cfg.Http.Host = "127.0.0.1"
+	cfg.Http.Port = "0"
+
+	srv := NewAPIServer(cfg, NewService(cfg))
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Open()
+	}()
+
+	require.NoError(t, srv.Shutdown(t.Context()))
+
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open did not return after Shutdown")
+	}
 }
