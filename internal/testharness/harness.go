@@ -60,9 +60,14 @@ type Harness struct {
 	t testing.TB
 
 	url        string
+	addr       string
 	configFile string
 	reload     chan struct{}
 	http       *http.Client
+	opts       []Option
+
+	m    sync.Mutex
+	stop func() error
 }
 
 // Option configures a Harness.
@@ -90,36 +95,72 @@ func New(t testing.TB, opts ...Option) *Harness {
 
 	h := &Harness{
 		t:          t,
+		addr:       "127.0.0.1:0",
 		configFile: filepath.Join(t.TempDir(), "config_server.yaml"),
 		reload:     make(chan struct{}),
 		http:       &http.Client{Timeout: 30 * time.Second},
+		opts:       opts,
 	}
 
 	writeYAML(t, h.configFile, map[string]any{
 		"http": map[string]any{"host": "127.0.0.1", "port": "0", "token": Token},
 	})
 
-	cfg := server.NewConfig()
-	require.NoError(t, cfg.LoadFromFile(h.configFile))
-
-	svc := server.NewService(cfg)
-	svc.HealthCheckInterval = healthCheckInterval
-	for _, o := range opts {
-		o(svc)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	h.url = "http://" + ln.Addr().String()
-
-	stop := serve(func(ctx context.Context) error { return svc.Serve(ctx, ln, h.reload) })
+	h.start(t)
 	t.Cleanup(func() {
-		if err := stop(); err != nil {
+		if err := h.stopServer(); err != nil {
 			t.Errorf("server: %v", err)
 		}
 	})
 
 	return h
+}
+
+// start runs a server on h.addr from the config file. The first start picks a
+// random port and keeps it, so a restarted server has the same URL.
+func (h *Harness) start(t testing.TB) {
+	t.Helper()
+
+	cfg := server.NewConfig()
+	require.NoError(t, cfg.LoadFromFile(h.configFile))
+
+	svc := server.NewService(cfg)
+	svc.HealthCheckInterval = healthCheckInterval
+	for _, o := range h.opts {
+		o(svc)
+	}
+
+	ln, err := net.Listen("tcp", h.addr)
+	require.NoError(t, err)
+	h.addr = ln.Addr().String()
+	h.url = "http://" + h.addr
+
+	h.m.Lock()
+	h.stop = serve(func(ctx context.Context) error { return svc.Serve(ctx, ln, h.reload) })
+	h.m.Unlock()
+}
+
+func (h *Harness) stopServer() error {
+	h.m.Lock()
+	stop := h.stop
+	h.stop = nil
+	h.m.Unlock()
+
+	if stop == nil {
+		return nil
+	}
+
+	return stop()
+}
+
+// RestartServer stops the server and starts a new one on the same address
+// from the config file, like a process restart: nodes come back from the
+// config, everything else is lost.
+func (h *Harness) RestartServer(t testing.TB) {
+	t.Helper()
+
+	require.NoError(t, h.stopServer())
+	h.start(t)
 }
 
 // URL is the base URL of the server.

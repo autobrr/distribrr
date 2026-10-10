@@ -63,7 +63,9 @@ restart on both; a bad file is logged and the old config kept.
   saved labels fetch them from the agent once and cache them.
   `REMOVED` node) instead of adding a duplicate.
 - Deregister flips the node to `REMOVED` on purpose; it stays in memory and in the config file. Unknown names give 404.
-- `HealthChecks` pings every non-removed agent every 10s and sets `READY` / `UNKNOWN`.
+- `HealthChecks` pings every non-removed agent at startup and then every 10s, and sets `READY` / `UNKNOWN`. A node
+  is `READY` as soon as it registers (the token callback reached it).
+- An agent registers once: it does not re-join if the server later loses its node, until the agent restarts.
 
 ### Agent (worker): `pkg/agent`, default port 7430
 - Runs next to qBittorrent with access to its storage paths. `Register()` retries every 10s until `Join` succeeds.

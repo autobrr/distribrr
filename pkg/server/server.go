@@ -325,6 +325,9 @@ func (s *Service) OnRegister(ctx context.Context, req RegisterRequest) error {
 		return nil
 	}
 
+	// the token callback just reached the agent, so don't wait for the next
+	// health check before sending it tasks
+	newNode.SetStatus(node.StatusReady)
 	s.workerNodes = append(s.workerNodes, newNode)
 
 	l.Info().Msgf("on register: new node %s %s", req.NodeName, req.ClientAddr)
@@ -395,6 +398,12 @@ func (s *Service) GetNodes() []*node.Node {
 func (s *Service) HealthChecks(ctx context.Context) {
 	ticker := time.NewTicker(s.HealthCheckInterval)
 	defer ticker.Stop()
+
+	// nodes loaded from the config start NOT_READY; check them now instead
+	// of rejecting every task until the first tick
+	if err := s.healthChecks(ctx); err != nil {
+		s.log.Error().Err(err).Msg("health checks failed")
+	}
 
 	for {
 		select {
