@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
+	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 )
 
@@ -99,7 +100,12 @@ func (s *APIServer) Handler() http.Handler {
 					}
 
 					if err := s.service.StartTask(te.Task); err != nil {
-						render.Status(r, http.StatusInternalServerError)
+						status := http.StatusInternalServerError
+						if errors.Is(err, ErrInsufficientStorage) {
+							status = http.StatusInsufficientStorage
+						}
+
+						render.Status(r, status)
 						render.JSON(w, r, map[string]string{"error": err.Error()})
 						return
 					}

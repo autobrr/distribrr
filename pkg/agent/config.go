@@ -106,33 +106,39 @@ type StorageRule struct {
 	MaxUsage string `yaml:"maxUsage"`
 }
 
-// allows reports whether a storage path satisfies the rule's minFree / maxUsage
-// thresholds. free is the space left on the filesystem; used is the space taken
-// by the files under the path itself, not the whole filesystem. An empty
-// threshold is ignored. A non-nil error means a configured threshold could not
-// be parsed; callers should log it and treat the rule as non-binding.
-func (r StorageRule) allows(free, used uint64) (bool, error) {
+// headroom reports how many more bytes can be written to a storage path before
+// the rule's minFree / maxUsage thresholds break, and whether the rule holds
+// right now. free is the space left on the filesystem; used is the space taken
+// by the files under the path itself, not the whole filesystem. Room never
+// exceeds free. An empty threshold is ignored. A non-nil error means a
+// configured threshold could not be parsed; callers should log it and treat
+// the rule as non-binding.
+func (r StorageRule) headroom(free, used uint64) (uint64, bool, error) {
+	room := free
+
 	if r.MinFree != "" {
 		minFree, err := humanize.ParseBytes(r.MinFree)
 		if err != nil {
-			return true, errors.Wrapf(err, "invalid minFree %q for path %q", r.MinFree, r.Path)
+			return free, true, errors.Wrapf(err, "invalid minFree %q for path %q", r.MinFree, r.Path)
 		}
 		if free < minFree {
-			return false, nil
+			return 0, false, nil
 		}
+		room = min(room, free-minFree)
 	}
 
 	if r.MaxUsage != "" {
 		maxUsage, err := humanize.ParseBytes(r.MaxUsage)
 		if err != nil {
-			return true, errors.Wrapf(err, "invalid maxUsage %q for path %q", r.MaxUsage, r.Path)
+			return free, true, errors.Wrapf(err, "invalid maxUsage %q for path %q", r.MaxUsage, r.Path)
 		}
 		if used > maxUsage {
-			return false, nil
+			return 0, false, nil
 		}
+		room = min(room, maxUsage-used)
 	}
 
-	return true, nil
+	return room, true, nil
 }
 
 type TorrentRules struct {

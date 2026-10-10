@@ -12,6 +12,7 @@ import (
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/autobrr/go-qbittorrent"
+	"github.com/dustin/go-humanize"
 	"github.com/rs/zerolog/log"
 )
 
@@ -81,10 +82,33 @@ func (r *LeastActive) SelectCandidateNodes(ctx context.Context, t task.Task, nod
 			continue
 		}
 
+		// the agent adds the torrent to every client with room, so the node
+		// only needs one client that fits
+		if !hasRoomFor(stat.ClientStats, t.Size) {
+			rejected = append(rejected, NodeRejection{Node: n.Name, Reasons: []string{fmt.Sprintf("no client has room for %s", humanize.Bytes(t.Size))}})
+			continue
+		}
+
 		candidates = append(candidates, n)
 	}
 
 	return candidates, rejected
+}
+
+// hasRoomFor reports whether at least one client has storage room for a torrent
+// of size bytes. An unknown size (0) always fits.
+func hasRoomFor(clients map[string]stats.ClientStats, size uint64) bool {
+	if size == 0 {
+		return true
+	}
+
+	for _, c := range clients {
+		if c.HasRoomFor(size) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // formatReasons renders client not-ready reasons for human-readable output.

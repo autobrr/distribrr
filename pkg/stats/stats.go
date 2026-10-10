@@ -74,10 +74,24 @@ type ClientStats struct {
 	MaxActiveDownloadsAllowed int                   `json:"max_active_downloads_allowed"`
 	Status                    ClientStatus          `json:"status"`
 	Reasons                   []NotReadyReason      `json:"reasons,omitempty"` // why the client is NOT_READY (may be several)
+	// StorageHeadroom is how many bytes can still be added before a storage
+	// rule breaks, with the remaining bytes of active downloads reserved. nil
+	// when the client has no storage rules, so there is nothing to check.
+	StorageHeadroom *uint64 `json:"storage_headroom,omitempty"`
 }
 
 func (c *ClientStats) HasAvailableSlot() bool {
 	return c.ActiveDownloadsCount < c.MaxActiveDownloadsAllowed
+}
+
+// HasRoomFor reports whether a torrent of size bytes fits within the client's
+// storage rules. An unknown size (0) or a client without storage rules always fits.
+func (c *ClientStats) HasRoomFor(size uint64) bool {
+	if size == 0 || c.StorageHeadroom == nil {
+		return true
+	}
+
+	return *c.StorageHeadroom >= size
 }
 
 type Stats struct {

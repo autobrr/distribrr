@@ -66,3 +66,15 @@ func TestGetDirUsage(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestClientStats_HasRoomFor(t *testing.T) {
+	const gb = 1_000_000_000
+
+	withRoom := ClientStats{StorageHeadroom: new(uint64(10 * gb))}
+	noRules := ClientStats{}
+
+	assert.True(t, withRoom.HasRoomFor(0), "unknown size always fits")
+	assert.True(t, withRoom.HasRoomFor(10*gb), "exactly the headroom fits")
+	assert.False(t, withRoom.HasRoomFor(10*gb+1))
+	assert.True(t, noRules.HasRoomFor(1000*gb), "no storage rules means nothing to check")
+}

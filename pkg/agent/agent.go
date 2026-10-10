@@ -2,8 +2,13 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"math"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -14,6 +19,9 @@ import (
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/autobrr/go-qbittorrent"
+	"github.com/c9s/goprocinfo/linux"
+	"github.com/dustin/go-humanize"
+	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
@@ -256,12 +264,31 @@ func (s *Service) StartTask(t task.Task) error {
 		opts["tags"] = t.Tags
 	}
 
+	// when the caller sent a size, reject before fetching the .torrent if no
+	// client has room for it
+	if t.Size > 0 {
+		if _, err := s.clientsWithRoom(ctx, t.Size); err != nil {
+			return err
+		}
+	}
+
 	rel := domain.NewRelease(t.DownloadURL, t.Name, t.Indexer)
 	if err := rel.DownloadTorrentFile(ctx); err != nil {
 		return err
 	}
 
-	for _, client := range s.clients {
+	// the size from the .torrent is exact; fall back to the caller's
+	size := rel.Size
+	if size == 0 {
+		size = t.Size
+	}
+
+	clients, err := s.clientsWithRoom(ctx, size)
+	if err != nil {
+		return err
+	}
+
+	for _, client := range clients {
 		sender.Go(func() error {
 			log.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
 
@@ -308,6 +335,40 @@ func (s *Service) StartTask(t task.Task) error {
 	}
 
 	return nil
+}
+
+// ErrInsufficientStorage is returned by StartTask when no client has room for
+// the torrent under its storage rules.
+var ErrInsufficientStorage = errors.New("insufficient storage")
+
+// clientsWithRoom returns the clients whose storage rules have room for a
+// torrent of size bytes. With an unknown size (0) every client is returned. It
+// returns ErrInsufficientStorage when no client has room.
+func (s *Service) clientsWithRoom(ctx context.Context, size uint64) ([]*QbitClient, error) {
+	if size == 0 {
+		return slices.Collect(maps.Values(s.clients)), nil
+	}
+
+	var clients []*QbitClient
+	var skipped []string
+
+	for _, client := range s.clients {
+		ct := s.clientStats(ctx, client, map[string]*linux.Disk{})
+
+		if !ct.HasRoomFor(size) {
+			log.Debug().Msgf("client %s has no room for %s (headroom %s)", client.Name, humanize.Bytes(size), humanize.Bytes(*ct.StorageHeadroom))
+			skipped = append(skipped, fmt.Sprintf("%s: %s room", client.Name, humanize.Bytes(*ct.StorageHeadroom)))
+			continue
+		}
+
+		clients = append(clients, client)
+	}
+
+	if len(clients) == 0 {
+		return nil, errors.Wrapf(ErrInsufficientStorage, "no client has room for %s (%s)", humanize.Bytes(size), strings.Join(skipped, ", "))
+	}
+
+	return clients, nil
 }
 
 func (s *Service) StopTask(t task.Task) {
@@ -362,84 +423,131 @@ func (s *Service) collectClientStats(ctx context.Context, st *stats.Stats) {
 
 	// TODO use errgroup
 	for name, client := range s.clients {
-		l := log.With().Str("client", name).Logger()
-
-		l.Trace().Msg("check disk per path for client")
-
-		storageReasons := checkStorage(l, client.Rules.Storage, st, s.dirUsage.get)
-
-		l.Trace().Msg("get active torrents for client")
-
-		activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
-		if err != nil {
-			l.Error().Err(err).Msgf("could not load active torrents for client")
-
-			// can't reach the client: report it as not ready so the scheduler
-			// skips it and the reason is visible, instead of silently dropping it.
-			reasons := append([]stats.NotReadyReason{stats.ReasonClientUnreachable}, storageReasons...)
-
-			st.ClientStats[name] = stats.ClientStats{
-				Name:                      name,
-				MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
-				Status:                    stats.ClientStatusNotReady,
-				Reasons:                   reasons,
-			}
-
-			continue
-		}
-
-		// a client is at capacity once it reaches its max active downloads, but
-		// we still allow it through if one of those downloads is nearly finished.
-		downloadsOK := len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads
-		if !downloadsOK && len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
-			l.Debug().Msgf("max active downloads (%d) reached, checking individual torrents...", client.Rules.Torrents.MaxActiveDownloads)
-
-			for _, torrent := range activeDownloads {
-				// if progress is above 75% and ETA is less than 60 seconds, treat it as a free slot
-				if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
-					downloadsOK = true
-					break
-				}
-			}
-		}
-
-		var reasons []stats.NotReadyReason
-		if !downloadsOK {
-			reasons = append(reasons, stats.ReasonMaxDownloadsReached)
-		}
-		reasons = append(reasons, storageReasons...)
-
-		status := stats.ClientStatusReady
-		if len(reasons) > 0 {
-			status = stats.ClientStatusNotReady
-		}
-
-		l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
-
-		ct := stats.ClientStats{
-			Name:                      name,
-			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
-			ActiveDownloadsCount:      len(activeDownloads),
-			ActiveDownloads:           activeDownloads,
-			Status:                    status,
-			Reasons:                   reasons,
-		}
-
-		l.Trace().Msgf("[%d/%d] active downloads, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Status)
-		l.Debug().Msgf("client status: %s", ct.Status)
-
-		st.ClientStats[name] = ct
+		st.ClientStats[name] = s.clientStats(ctx, client, st.DiskPathStats)
 	}
 }
 
+// clientStats reports the torrent and storage status of one client. Disk stats
+// for its storage paths are recorded in diskPaths.
+func (s *Service) clientStats(ctx context.Context, client *QbitClient, diskPaths map[string]*linux.Disk) stats.ClientStats {
+	l := log.With().Str("client", client.Name).Logger()
+
+	l.Trace().Msg("get active torrents for client")
+
+	activeDownloads, err := client.Client.GetTorrentsActiveDownloadsCtx(ctx)
+	if err != nil {
+		l.Error().Err(err).Msgf("could not load active torrents for client")
+
+		// can't reach the client: report it as not ready so the scheduler
+		// skips it and the reason is visible, instead of silently dropping it.
+		storageReasons, headroom := checkStorage(l, client.Rules.Storage, 0, diskPaths, s.dirUsage.get)
+
+		return stats.ClientStats{
+			Name:                      client.Name,
+			MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
+			Status:                    stats.ClientStatusNotReady,
+			Reasons:                   append([]stats.NotReadyReason{stats.ReasonClientUnreachable}, storageReasons...),
+			StorageHeadroom:           headroom,
+		}
+	}
+
+	l.Trace().Msg("check disk per path for client")
+
+	reserved := reservedBytes(ctx, l, client, activeDownloads)
+	storageReasons, headroom := checkStorage(l, client.Rules.Storage, reserved, diskPaths, s.dirUsage.get)
+
+	// a client is at capacity once it reaches its max active downloads, but
+	// we still allow it through if one of those downloads is nearly finished.
+	downloadsOK := len(activeDownloads) < client.Rules.Torrents.MaxActiveDownloads
+	if !downloadsOK && len(activeDownloads) == client.Rules.Torrents.MaxActiveDownloads {
+		l.Debug().Msgf("max active downloads (%d) reached, checking individual torrents...", client.Rules.Torrents.MaxActiveDownloads)
+
+		for _, torrent := range activeDownloads {
+			// if progress is above 75% and ETA is less than 60 seconds, treat it as a free slot
+			if torrent.Progress >= 0.75 && torrent.ETA <= 60 {
+				downloadsOK = true
+				break
+			}
+		}
+	}
+
+	var reasons []stats.NotReadyReason
+	if !downloadsOK {
+		reasons = append(reasons, stats.ReasonMaxDownloadsReached)
+	}
+	reasons = append(reasons, storageReasons...)
+
+	status := stats.ClientStatusReady
+	if len(reasons) > 0 {
+		status = stats.ClientStatusNotReady
+	}
+
+	l.Trace().Msgf("found %d active torrents for client", len(activeDownloads))
+
+	ct := stats.ClientStats{
+		Name:                      client.Name,
+		MaxActiveDownloadsAllowed: client.Rules.Torrents.MaxActiveDownloads,
+		ActiveDownloadsCount:      len(activeDownloads),
+		ActiveDownloads:           activeDownloads,
+		Status:                    status,
+		Reasons:                   reasons,
+		StorageHeadroom:           headroom,
+	}
+
+	l.Trace().Msgf("[%d/%d] active downloads, status: %s", len(activeDownloads), client.Rules.Torrents.MaxActiveDownloads, ct.Status)
+	l.Debug().Msgf("client status: %s", ct.Status)
+
+	return ct
+}
+
+// reservedBytes is the space active downloads will still write: the sum of
+// their remaining bytes. When qBittorrent preallocates files that space is
+// already taken on disk, so nothing is reserved. If the preference cannot be
+// read we reserve anyway, since overestimating is the safe side.
+func reservedBytes(ctx context.Context, l zerolog.Logger, client *QbitClient, activeDownloads []qbittorrent.Torrent) uint64 {
+	if len(activeDownloads) == 0 || len(client.Rules.Storage) == 0 {
+		return 0
+	}
+
+	prefs, err := client.Client.GetAppPreferencesCtx(ctx)
+	if err != nil {
+		l.Warn().Err(err).Msg("could not read client preferences, assuming files are not preallocated")
+	} else if prefs.PreallocateAll {
+		return 0
+	}
+
+	return sumAmountLeft(activeDownloads)
+}
+
+func sumAmountLeft(torrents []qbittorrent.Torrent) uint64 {
+	var total uint64
+	for _, t := range torrents {
+		if t.AmountLeft > 0 {
+			total += uint64(t.AmountLeft)
+		}
+	}
+
+	return total
+}
+
 // checkStorage checks every storage rule against its path and records the disk
-// stats in st. It returns ReasonDiskFull when a readable path breaks its
+// stats in diskPaths. reserved is space already promised to active downloads:
+// it is taken off free space and added to used space before the rules are
+// checked. It returns ReasonDiskFull when a readable path breaks its
 // minFree / maxUsage rule, and ReasonStorageUnavailable when a path cannot be
 // read at all (missing mount, typo), so the two are not confused. dirUsage
 // measures the space used under a path and is only called for maxUsage rules.
-func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats, dirUsage func(path string) (uint64, error)) []stats.NotReadyReason {
+//
+// The returned headroom is the smallest room left across all rules, 0 when any
+// rule fails, and nil when there are no rules.
+func checkStorage(l zerolog.Logger, rules []StorageRule, reserved uint64, diskPaths map[string]*linux.Disk, dirUsage func(path string) (uint64, error)) ([]stats.NotReadyReason, *uint64) {
+	if len(rules) == 0 {
+		return nil, nil
+	}
+
 	diskFull := false
 	unavailable := false
+	headroom := uint64(math.MaxUint64)
 
 	for _, storage := range rules {
 		l.Trace().Msgf("check disk for path %q", storage.Path)
@@ -451,7 +559,7 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats, dirUsa
 			continue
 		}
 
-		st.DiskPathStats[storage.Path] = disk
+		diskPaths[storage.Path] = disk
 
 		var used uint64
 		if storage.MaxUsage != "" {
@@ -463,17 +571,21 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats, dirUsa
 			}
 		}
 
-		allowed, err := storage.allows(disk.Free, used)
+		free := disk.Free - min(disk.Free, reserved)
+		used += reserved
+
+		room, ok, err := storage.headroom(free, used)
 		if err != nil {
 			// bad threshold config: log and treat the rule as non-binding
 			l.Warn().Err(err).Msgf("ignoring storage rule for path %q", storage.Path)
-			continue
 		}
 
-		if !allowed {
+		if !ok {
 			diskFull = true
-			l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, used)
+			l.Debug().Msgf("storage path %q does not satisfy rule (minFree=%q maxUsage=%q free=%d used=%d reserved=%d bytes)", storage.Path, storage.MinFree, storage.MaxUsage, disk.Free, used-reserved, reserved)
 		}
+
+		headroom = min(headroom, room)
 	}
 
 	var reasons []stats.NotReadyReason
@@ -482,9 +594,10 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, st *stats.Stats, dirUsa
 	}
 	if unavailable {
 		reasons = append(reasons, stats.ReasonStorageUnavailable)
+		headroom = 0
 	}
 
-	return reasons
+	return reasons, &headroom
 }
 
 // dirUsageTTL is how long a measured dir usage is reused. Walking a large torrent
