@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
+	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -37,10 +38,8 @@ func (s *APIServer) Open() error {
 	addr := net.JoinHostPort(s.host, s.port)
 
 	listener, err := net.Listen("tcp", addr)
-
 	if err != nil {
-		log.Error().Err(err).Msgf("could not open listener on: %s", addr)
-		//return errors.Wrap(err, "error opening http server")
+		return errors.Wrapf(err, "could not open listener on: %s", addr)
 	}
 
 	server := http.Server{

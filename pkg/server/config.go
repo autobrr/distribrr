@@ -7,7 +7,6 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog/log"
 	yml "gopkg.in/yaml.v3"
 )
 
@@ -63,12 +62,12 @@ func (c *Config) LoadFromFile(configPath string) error {
 		}
 
 		if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
-			log.Fatal().Err(err).Str("service", "config").Msgf("failed parsing %q", configPath)
+			return errors.Wrapf(err, "could not parse config file: %s", configPath)
 		}
 
 		// unmarshal
 		if err := k.Unmarshal("", &c); err != nil {
-			log.Fatal().Err(err).Str("service", "config").Msgf("failed unmarshalling %q", configPath)
+			return errors.Wrapf(err, "could not unmarshal config file: %s", configPath)
 		}
 	}
 	return nil
@@ -79,11 +78,11 @@ func (c *Config) WriteToFile() error {
 		// write file
 		data, err := yml.Marshal(&c)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("failed parsing config: %q", c.configFile)
+			return errors.Wrapf(err, "could not marshal config: %s", c.configFile)
 		}
 
 		if err := os.WriteFile(c.configFile, data, 0664); err != nil {
-			log.Fatal().Err(err).Msgf("could not write config to file: %q", c.configFile)
+			return errors.Wrapf(err, "could not write config to file: %s", c.configFile)
 		}
 	}
 	return nil

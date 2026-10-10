@@ -3,7 +3,7 @@ package cmd
 import (
 	"github.com/autobrr/distribrr/pkg/server"
 
-	"github.com/rs/zerolog/log"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -25,7 +25,7 @@ func CommandServerRun() *cobra.Command {
 		Use:          "run",
 		Short:        "Run server",
 		Example:      `  distribrr server run`,
-		SilenceUsage: false,
+		SilenceUsage: true,
 	}
 
 	var configPath string
@@ -37,17 +37,21 @@ func CommandServerRun() *cobra.Command {
 	command.Flags().StringVar(&cfg.Http.Port, "http-port", "7422", "HTTP port. Default: 7422")
 	command.Flags().StringVar(&cfg.Http.Token, "http-api-token", "", "API token")
 
-	command.Run = func(cmd *cobra.Command, args []string) {
+	command.RunE = func(cmd *cobra.Command, args []string) error {
 		if err := cfg.LoadFromFile(configPath); err != nil {
-			log.Fatal().Err(err).Msgf("could not load config from file: %s", configPath)
+			return errors.Wrapf(err, "could not load config from file: %s", configPath)
 		}
 
 		if cfg.Http.Token == "" {
-			log.Fatal().Msg("http.token must be set; refusing to start without an API token")
+			return errors.New("http.token must be set; refusing to start without an API token")
 		}
 
 		app := server.NewService(cfg)
-		app.Run()
+		if err := app.Run(); err != nil {
+			return errors.Wrap(err, "could not run server")
+		}
+
+		return nil
 	}
 
 	return command

@@ -36,7 +36,7 @@ make build                 # deps + static linux/amd64 binary -> bin/distribrr (
 go build ./...             # quick compile check (any host arch)
 go test ./...              # all tests
 go test ./pkg/scheduler/ -run TestLeastActive_Score -v   # single test
-go vet ./...               # currently fails: unused slices.DeleteFunc result in pkg/server/server.go removeNodeFromConfig
+go vet ./...
 nilaway ./...              # only configured linter; CI runs it continue-on-error, not yet clean
 ```
 

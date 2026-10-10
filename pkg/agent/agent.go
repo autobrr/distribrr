@@ -57,7 +57,7 @@ func NewService(cfg *Config) *Service {
 	return s
 }
 
-func (s *Service) Run() {
+func (s *Service) Run() error {
 	srv := NewAPIServer(s.cfg, s)
 
 	// register agent with server
@@ -66,7 +66,7 @@ func (s *Service) Run() {
 	// keep dir usage for maxUsage rules measured in the background
 	go s.dirUsage.run(context.Background(), s.dirUsagePaths(), dirUsageInterval)
 
-	errorChannel := make(chan error)
+	errorChannel := make(chan error, 1)
 	go func() {
 		errorChannel <- srv.Open()
 	}()
@@ -74,7 +74,10 @@ func (s *Service) Run() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
 
-	for sig := range sigCh {
+	select {
+	case err := <-errorChannel:
+		return errors.Wrap(err, "http server stopped")
+	case sig := <-sigCh:
 		log.Info().Msgf("got signal %q, shutting down server", sig)
 
 		if err := s.Deregister(); err != nil {
@@ -83,11 +86,12 @@ func (s *Service) Run() {
 
 		os.Exit(0)
 	}
+
+	return nil
 }
 
 func (s *Service) initClients() {
 	for name, c := range s.cfg.Clients {
-		c := c
 		client := qbittorrent.NewClient(qbittorrent.Config{
 			Host:          c.Host,
 			Username:      c.User,
