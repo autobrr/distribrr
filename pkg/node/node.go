@@ -27,8 +27,6 @@ type Node struct {
 	Token           string            `json:"-"`
 	Memory          int64             `json:"-"`
 	MemoryAllocated int64             `json:"-"`
-	Disk            int64             `json:"-"`
-	DiskAllocated   int64             `json:"-"`
 	Stats           stats.Stats       `json:"-"`
 	Role            string            `json:"role"`
 	TaskCount       int               `json:"task_count"`
@@ -74,12 +72,11 @@ func (n *Node) GetStats(ctx context.Context) (*stats.Stats, error) {
 		return nil, err
 	}
 
-	if nodeStats.MemStats == nil || nodeStats.DiskStats == nil {
+	if nodeStats.MemStats == nil {
 		return nil, fmt.Errorf("error getting stats from node %s", n.Name)
 	}
 
 	n.Memory = int64(nodeStats.MemTotalKb())
-	n.Disk = int64(nodeStats.DiskTotal())
 	n.Stats = *nodeStats
 
 	return &n.Stats, nil

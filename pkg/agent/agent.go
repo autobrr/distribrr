@@ -25,7 +25,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 )
 
 type Service struct {
@@ -63,6 +62,9 @@ func (s *Service) Run() {
 
 	// register agent with server
 	go s.Register()
+
+	// keep dir usage for maxUsage rules measured in the background
+	go s.dirUsage.run(context.Background(), s.dirUsagePaths(), dirUsageInterval)
 
 	errorChannel := make(chan error)
 	go func() {
@@ -200,33 +202,6 @@ func (s *Service) Healthcheck(ctx context.Context) error {
 	// TODO check client(s) and report status
 	return nil
 }
-
-func (s *Service) GetFreeSpace(ctx context.Context, dir string) error {
-	return nil
-}
-
-//func checkFreeSpace(paths []string) (bool, error) {
-//	for _, path := range paths {
-//		splits := strings.Split(path, "=")
-//
-//		if len(splits) >= 2 {
-//			minFreeBytes, err := humanize.ParseBytes(splits[1])
-//			if err != nil {
-//				return false, err
-//			}
-//
-//			usage := diskusage.NewDiskUsage(splits[0])
-//			available := usage.Available()
-//
-//			if available <= minFreeBytes {
-//				log.Debug().Msgf("less free space than wanted. got: %s wanted: %s", humanize.Bytes(available), humanize.Bytes(minFreeBytes))
-//				return false, nil
-//			}
-//		}
-//	}
-//
-//	return true, nil
-//}
 
 func (s *Service) GetTasks() {
 	// get tasks
@@ -536,7 +511,9 @@ func sumAmountLeft(torrents []qbittorrent.Torrent) uint64 {
 // checked. It returns ReasonDiskFull when a readable path breaks its
 // minFree / maxUsage rule, and ReasonStorageUnavailable when a path cannot be
 // read at all (missing mount, typo), so the two are not confused. dirUsage
-// measures the space used under a path and is only called for maxUsage rules.
+// returns the space used under a path and is only called for maxUsage rules;
+// until a path has been measured the client reports ReasonStorageMeasuring,
+// since unknown usage must not count as room.
 //
 // The returned headroom is the smallest room left across all rules, 0 when any
 // rule fails, and nil when there are no rules.
@@ -547,6 +524,7 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, reserved uint64, diskPa
 
 	diskFull := false
 	unavailable := false
+	measuring := false
 	headroom := uint64(math.MaxUint64)
 
 	for _, storage := range rules {
@@ -564,6 +542,11 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, reserved uint64, diskPa
 		var used uint64
 		if storage.MaxUsage != "" {
 			used, err = dirUsage(storage.Path)
+			if errors.Is(err, errDirUsagePending) {
+				measuring = true
+				l.Debug().Msgf("usage of storage path %q is still being measured", storage.Path)
+				continue
+			}
 			if err != nil {
 				unavailable = true
 				l.Error().Err(err).Msgf("could not measure usage of storage path %q", storage.Path)
@@ -596,56 +579,102 @@ func checkStorage(l zerolog.Logger, rules []StorageRule, reserved uint64, diskPa
 		reasons = append(reasons, stats.ReasonStorageUnavailable)
 		headroom = 0
 	}
+	if measuring {
+		reasons = append(reasons, stats.ReasonStorageMeasuring)
+		headroom = 0
+	}
 
 	return reasons, &headroom
 }
 
-// dirUsageTTL is how long a measured dir usage is reused. Walking a large torrent
-// directory is slow, and /stats is called for every task the server schedules.
-const dirUsageTTL = time.Minute
+// dirUsageInterval is how often the storage paths with a maxUsage rule are
+// walked. Walking a large torrent directory is slow, so it runs in the
+// background and /stats only reads the last result.
+const dirUsageInterval = time.Minute
+
+// errDirUsagePending means a path has not been measured yet, because the first
+// background walk is still running.
+var errDirUsagePending = errors.New("dir usage not measured yet")
 
 type dirUsageEntry struct {
 	used uint64
-	at   time.Time
+	err  error
 }
 
-// dirUsageCache caches stats.GetDirUsage per path for dirUsageTTL. Concurrent
-// lookups of the same path share one walk. The zero value is ready to use.
+// dirUsageCache holds the last measured stats.GetDirUsage per path. run keeps it
+// fresh in the background; get never walks. The zero value is ready to use.
 type dirUsageCache struct {
-	m       sync.Mutex
+	m       sync.RWMutex
 	entries map[string]dirUsageEntry
-	group   singleflight.Group
 }
 
+// get returns the last measured usage of path, the error from its last walk,
+// or errDirUsagePending when it has not been measured yet.
 func (c *dirUsageCache) get(path string) (uint64, error) {
-	c.m.Lock()
+	c.m.RLock()
 	e, ok := c.entries[path]
+	c.m.RUnlock()
+
+	if !ok {
+		return 0, errDirUsagePending
+	}
+
+	return e.used, e.err
+}
+
+// refresh walks path and stores the result.
+func (c *dirUsageCache) refresh(path string) {
+	used, err := stats.GetDirUsage(path)
+
+	c.m.Lock()
+	if c.entries == nil {
+		c.entries = map[string]dirUsageEntry{}
+	}
+	c.entries[path] = dirUsageEntry{used: used, err: err}
 	c.m.Unlock()
+}
 
-	if ok && time.Since(e.at) < dirUsageTTL {
-		return e.used, nil
+// run measures every path right away, then again every interval, until ctx is done.
+func (c *dirUsageCache) run(ctx context.Context, paths []string, interval time.Duration) {
+	if len(paths) == 0 {
+		return
 	}
 
-	v, err, _ := c.group.Do(path, func() (any, error) {
-		used, err := stats.GetDirUsage(path)
-		if err != nil {
-			return uint64(0), err
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		for _, path := range paths {
+			if ctx.Err() != nil {
+				return
+			}
+
+			start := time.Now()
+			c.refresh(path)
+			log.Trace().Msgf("measured dir usage of %q in %s", path, time.Since(start))
 		}
 
-		c.m.Lock()
-		if c.entries == nil {
-			c.entries = map[string]dirUsageEntry{}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
-		c.entries[path] = dirUsageEntry{used: used, at: time.Now()}
-		c.m.Unlock()
+	}
+}
 
-		return used, nil
-	})
-	if err != nil {
-		return 0, err
+// dirUsagePaths returns the storage paths that have a maxUsage rule, which are
+// the only ones that need their dir usage measured.
+func (s *Service) dirUsagePaths() []string {
+	var paths []string
+	for _, client := range s.clients {
+		for _, storage := range client.Rules.Storage {
+			if storage.MaxUsage != "" && !slices.Contains(paths, storage.Path) {
+				paths = append(paths, storage.Path)
+			}
+		}
 	}
 
-	return v.(uint64), nil
+	return paths
 }
 
 func (s *Service) GetLabels() map[string]string {

@@ -65,6 +65,7 @@ const (
 	ReasonDiskFull            NotReadyReason = "disk_full"
 	ReasonClientUnreachable   NotReadyReason = "client_unreachable"
 	ReasonStorageUnavailable  NotReadyReason = "storage_unavailable"
+	ReasonStorageMeasuring    NotReadyReason = "storage_measuring" // maxUsage path not measured yet after agent start
 )
 
 type ClientStats struct {
@@ -96,7 +97,7 @@ func (c *ClientStats) HasRoomFor(size uint64) bool {
 
 type Stats struct {
 	MemStats      *linux.MemInfo         `json:"mem_stats"`
-	DiskStats     *linux.Disk            `json:"disk_stats"`
+	DiskStats     *linux.Disk            `json:"disk_stats"` // root filesystem, informational; nil if unreadable
 	DiskPathStats map[string]*linux.Disk `json:"disk_path_stats"`
 	CpuStats      *linux.CPUStat         `json:"cpu_stats"`
 	LoadStats     *linux.LoadAvg         `json:"load_stats"`
@@ -119,18 +120,6 @@ func (s *Stats) MemAvailableKb() uint64 {
 
 func (s *Stats) MemTotalKb() uint64 {
 	return s.MemStats.MemTotal
-}
-
-func (s *Stats) DiskTotal() uint64 {
-	return s.DiskStats.All
-}
-
-func (s *Stats) DiskFree() uint64 {
-	return s.DiskStats.Free
-}
-
-func (s *Stats) DiskUsed() uint64 {
-	return s.DiskStats.Used
 }
 
 func (s *Stats) CpuUsage() float64 {
@@ -174,20 +163,21 @@ func GetMemoryInfo() *linux.MemInfo {
 	return memstats
 }
 
-// GetDiskInfo See https://godoc.org/github.com/c9s/goprocinfo/linux#Disk
+// GetDiskInfo returns disk stats for the root filesystem, or nil if they cannot
+// be read. It is informational only: scheduling uses the per-path storage rules,
+// and inside a container "/" is the container's own filesystem.
 func GetDiskInfo() *linux.Disk {
-	diskstats, err := linux.ReadDisk("/")
+	disk, err := GetDiskInfoByPath("/")
 	if err != nil {
-		//log.Printf("Error reading from /")
-		log.Error().Err(err).Msgf("Error reading from /")
-		return &linux.Disk{}
+		log.Error().Err(err).Msg("could not read disk stats for /")
+		return nil
 	}
 
-	return diskstats
+	return disk
 }
 
-// GetDiskInfoByPath reads disk stats for path via statfs. Unlike GetDiskInfo it
-// returns the error, so callers can tell an unreadable path apart from a full disk.
+// GetDiskInfoByPath reads disk stats for path via statfs. It returns the error,
+// so callers can tell an unreadable path apart from a full disk.
 //
 // Free is the space available to unprivileged users (Bavail), not Bfree as in
 // linux.ReadDisk, which counts root-reserved blocks the agent cannot write to.

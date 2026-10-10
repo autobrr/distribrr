@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
@@ -20,6 +21,7 @@ import (
 	"github.com/autobrr/go-qbittorrent"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestService_GetStatsFull_concurrent guards against the shared-state race
@@ -87,6 +89,13 @@ func TestCheckStorage(t *testing.T) {
 			want:     []stats.NotReadyReason{stats.ReasonStorageUnavailable},
 		},
 		{
+			name:         "dir usage not measured yet is not room",
+			rules:        []StorageRule{{Path: dir, MaxUsage: "1200GB"}},
+			dirUsage:     func(string) (uint64, error) { return 0, errDirUsagePending },
+			want:         []stats.NotReadyReason{stats.ReasonStorageMeasuring},
+			wantHeadroom: new(uint64(0)),
+		},
+		{
 			name:         "reserved bytes count toward maxUsage",
 			rules:        []StorageRule{{Path: dir, MaxUsage: "10MB"}},
 			reserved:     5 * mb,
@@ -138,23 +147,80 @@ func TestCheckStorage(t *testing.T) {
 	}
 }
 
-func TestDirUsageCache_get(t *testing.T) {
+func TestDirUsageCache(t *testing.T) {
 	dir := t.TempDir()
 
 	var c dirUsageCache
 
+	// nothing is walked on get, so an unmeasured path is pending
+	_, err := c.get(dir)
+	assert.ErrorIs(t, err, errDirUsagePending)
+
+	c.refresh(dir)
 	before, err := c.get(dir)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, os.WriteFile(filepath.Join(dir, "file"), make([]byte, 1<<20), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file"), make([]byte, 1<<20), 0o644))
 
-	// within the TTL the cached value is returned, not a fresh walk
+	// get returns the last measured value until the next refresh
 	cached, err := c.get(dir)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, before, cached)
 
-	_, err = c.get(filepath.Join(dir, "does-not-exist"))
+	c.refresh(dir)
+	after, err := c.get(dir)
+	require.NoError(t, err)
+	assert.Greater(t, after, before)
+
+	missing := filepath.Join(dir, "does-not-exist")
+	c.refresh(missing)
+	_, err = c.get(missing)
 	assert.Error(t, err)
+	assert.NotErrorIs(t, err, errDirUsagePending)
+}
+
+func TestDirUsageCache_run(t *testing.T) {
+	dir := t.TempDir()
+
+	var c dirUsageCache
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		c.run(ctx, []string{dir}, time.Hour)
+		close(done)
+	}()
+
+	// the first walk runs right away, without waiting for the interval
+	require.Eventually(t, func() bool {
+		_, err := c.get(dir)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop after ctx was cancelled")
+	}
+}
+
+func TestService_dirUsagePaths(t *testing.T) {
+	s := &Service{clients: map[string]*QbitClient{
+		"a": {Rules: ClientRules{Storage: []StorageRule{
+			{Path: "/data", MaxUsage: "1TB"},
+			{Path: "/fast", MinFree: "50GB"},
+		}}},
+		"b": {Rules: ClientRules{Storage: []StorageRule{
+			{Path: "/data", MaxUsage: "2TB"},
+		}}},
+	}}
+
+	// only maxUsage paths need a walk, and a shared path is walked once
+	assert.Equal(t, []string{"/data"}, s.dirUsagePaths())
 }
 
 // fakeQbit serves the two qBittorrent endpoints clientStats calls: one active
