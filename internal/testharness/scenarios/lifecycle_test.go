@@ -79,6 +79,48 @@ func TestLifecycle(t *testing.T) {
 		assert.Contains(t, body, "node1 (node not ready (UNKNOWN))")
 	})
 
+	t.Run("agent joins again when a restarted server lost its node", func(t *testing.T) {
+		e := newEnv(t)
+
+		a, q := e.agent(t, "node1", nil)
+		e.WaitReady(t, a)
+
+		// the server comes back without the node, e.g. a container without a volume
+		cfg := server.NewConfig()
+		require.NoError(t, cfg.LoadFromFile(e.ConfigFile()))
+		cfg.Nodes = nil
+		require.NoError(t, cfg.WriteToFile())
+
+		e.RestartServer(t)
+		_, ok := e.Node(t, "node1")
+		require.False(t, ok)
+
+		e.WaitReady(t, a)
+
+		status, body := e.Webhook(t, e.release("Rejoined.Release-GRP", 10*mb))
+		require.Equal(t, http.StatusCreated, status, body)
+		assert.Len(t, q.Added(), 1)
+	})
+
+	t.Run("node taken out of the server config stays removed", func(t *testing.T) {
+		e := newEnv(t)
+
+		a, _ := e.agent(t, "node1", nil)
+		e.WaitReady(t, a)
+
+		e.ReloadServer(t, func(cfg *server.Config) {
+			cfg.Nodes = nil
+		})
+		e.WaitNode(t, "node1", "REMOVED", testharness.WaitTimeout)
+
+		// several registration checks, none of which may join again
+		time.Sleep(time.Second)
+
+		n, ok := e.Node(t, "node1")
+		require.True(t, ok)
+		assert.Equal(t, "REMOVED", n.Status)
+	})
+
 	for _, crash := range []bool{false, true} {
 		name := "agent restarted on a new port after a stop is one node again"
 		if crash {

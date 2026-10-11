@@ -86,6 +86,18 @@ func (s *APIServer) Handler() http.Handler {
 					render.JSON(w, r, nodes)
 				})
 
+				// agents poll this to find out whether the server still knows them
+				r.Get("/{name}", func(w http.ResponseWriter, r *http.Request) {
+					n, err := s.service.GetNode(chi.URLParam(r, "name"))
+					if err != nil {
+						render.Status(r, http.StatusNotFound)
+						render.JSON(w, r, map[string]string{"error": err.Error()})
+						return
+					}
+
+					render.JSON(w, r, n)
+				})
+
 				r.Post("/register", func(w http.ResponseWriter, r *http.Request) {
 					req := RegisterRequest{}
 

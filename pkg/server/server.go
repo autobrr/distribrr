@@ -399,6 +399,22 @@ func (s *Service) GetNodes() []*node.Node {
 	return s.workerNodes
 }
 
+// GetNode returns the node named name, REMOVED ones included.
+func (s *Service) GetNode(name string) (*node.Node, error) {
+	s.m.RLock()
+	defer s.m.RUnlock()
+
+	idx := slices.IndexFunc(s.workerNodes, func(n *node.Node) bool {
+		return n.Name == name
+	})
+
+	if idx < 0 {
+		return nil, errors.Wrapf(ErrNodeNotFound, "could not find node: %s", name)
+	}
+
+	return s.workerNodes[idx], nil
+}
+
 // HealthChecks checks every node each HealthCheckInterval until ctx is done.
 func (s *Service) HealthChecks(ctx context.Context) {
 	ticker := time.NewTicker(s.HealthCheckInterval)
