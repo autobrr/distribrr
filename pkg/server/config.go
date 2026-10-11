@@ -2,6 +2,8 @@ package server
 
 import (
 	"os"
+	"path/filepath"
+	"syscall"
 
 	"github.com/autobrr/distribrr/pkg/token"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
 	yml "gopkg.in/yaml.v3"
 )
 
@@ -112,9 +115,69 @@ func (c *Config) WriteToFile() error {
 			return errors.Wrapf(err, "could not marshal config: %s", c.configFile)
 		}
 
-		if err := os.WriteFile(c.configFile, data, 0664); err != nil {
+		if err := writeFileAtomic(c.configFile, data); err != nil {
 			return errors.Wrapf(err, "could not write config to file: %s", c.configFile)
 		}
 	}
+	return nil
+}
+
+// writeFileAtomic replaces path with data through a temp file and a rename, so
+// a crash or a full disk mid-write leaves the old file instead of a truncated
+// one. The file keeps its mode, 0664 for a new file, and a symlink is followed
+// so the link stays. When the rename cannot work, because the file is a bind
+// mount or its dir is not writable, the file is written in place.
+func writeFileAtomic(path string, data []byte) error {
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
+
+	perm := os.FileMode(0664)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			log.Warn().Err(err).Msgf("could not create temp file next to %s, writing it in place", path)
+			return os.WriteFile(path, data, perm)
+		}
+
+		return errors.Wrap(err, "could not create temp file")
+	}
+
+	// a no-op once the rename succeeded
+	defer os.Remove(tmp.Name())
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return errors.Wrap(err, "could not write temp file")
+	}
+
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return errors.Wrap(err, "could not set temp file mode")
+	}
+
+	// flush before the rename, or a crash could leave an empty file in place
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return errors.Wrap(err, "could not sync temp file")
+	}
+
+	if err := tmp.Close(); err != nil {
+		return errors.Wrap(err, "could not close temp file")
+	}
+
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			log.Warn().Msgf("%s is a mount point and cannot be replaced, writing it in place", path)
+			return os.WriteFile(path, data, perm)
+		}
+
+		return errors.Wrap(err, "could not replace config file")
+	}
+
 	return nil
 }
