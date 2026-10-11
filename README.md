@@ -133,6 +133,10 @@ To use with autobrr set up a new action of type `Webhook` and use the following:
 
    Both only consider ready nodes that match `labels`. An unknown value is rejected with `400`.
 
+   `max_replicas` is the number of nodes that get the torrent (default `1`). Each node adds it to one of its clients:
+   the least active ready client with room, then the one with the most storage headroom. If that add fails, the node
+   tries its next client.
+
     `size` is optional. When it is set, the server skips nodes where no client has storage room for the torrent, so another node can take it. It is `0` when autobrr does not know the size yet; the agent then checks against the size from the `.torrent` file.
 
 ## Flow

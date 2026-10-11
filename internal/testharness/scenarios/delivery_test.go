@@ -127,10 +127,10 @@ func TestTorrentUpload(t *testing.T) {
 		assert.Equal(t, 1, e.tracker.Downloads("Upload.Release-GRP"))
 	})
 
-	t.Run("every client and replica gets the file from one fetch per agent", func(t *testing.T) {
+	t.Run("each replica adds to one client from one fetch per agent", func(t *testing.T) {
 		e := newEnv(t)
 
-		var qbits []*fakeqbit.Server
+		agentQbits := map[string][]*fakeqbit.Server{}
 		for _, name := range []string{"node1", "node2"} {
 			q1, q2 := fakeqbit.New(t), fakeqbit.New(t)
 			a := e.AddAgent(t, testharness.AgentSpec{
@@ -138,7 +138,7 @@ func TestTorrentUpload(t *testing.T) {
 				Clients: []testharness.ClientSpec{{Name: "qbit1", Qbit: q1}, {Name: "qbit2", Qbit: q2}},
 			})
 			e.WaitReady(t, a)
-			qbits = append(qbits, q1, q2)
+			agentQbits[name] = []*fakeqbit.Server{q1, q2}
 		}
 
 		u, hash := e.tracker.Add("Replicas.Upload-GRP", 10*mb)
@@ -148,10 +148,13 @@ func TestTorrentUpload(t *testing.T) {
 		status, body := e.Webhook(t, tk)
 		require.Equal(t, http.StatusCreated, status, body)
 
-		for _, q := range qbits {
-			added := q.Added()
-			require.Len(t, added, 1)
-			assert.Equal(t, hash, added[0].Hash)
+		for name, qbits := range agentQbits {
+			assert.Equal(t, 1, totalAdded(qbits...), "agent %s should add to exactly one client", name)
+			for _, q := range qbits {
+				for _, added := range q.Added() {
+					assert.Equal(t, hash, added.Hash)
+				}
+			}
 		}
 		assert.Equal(t, 2, e.tracker.Downloads("Replicas.Upload-GRP"))
 	})

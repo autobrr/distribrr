@@ -21,7 +21,9 @@ Guidance for AI coding agents (Claude Code, Codex, Cursor, etc.) working in this
 
 ## What this is
 
-A single Go binary that runs as **either** a `server` (manager) **or** an `agent` (worker). autobrr fires a webhook at the server; the server picks agents via a scheduler and forwards the task; each chosen agent adds the torrent to its local qBittorrent client(s).
+A single Go binary that runs as **either** a `server` (manager) **or** an `agent` (worker). autobrr fires a webhook at
+the server; the server picks agents via a scheduler and forwards the task; each chosen agent adds the torrent to one of
+its local qBittorrent clients.
 
 ```
 announce -> autobrr -> filters -> actions(webhook) -> distribrr server
@@ -90,15 +92,19 @@ restart on both; a bad file is logged and the old config kept.
 
 ### Tasks and size
 - `task.Task.Size` (`size`, bytes) is optional: 0 means unknown; autobrr fills it with `{{ .Size }}`.
-- Agent `StartTask` adds the torrent only to `READY` clients with room (`readyClients`), not to all clients. It checks
-  before fetching the `.torrent` (with the webhook size, if any), then re-checks with the exact size from the
-  `.torrent`. No ready client returns `ErrNoReadyClients` (HTTP 503); no ready client with room returns
-  `ErrInsufficientStorage` (HTTP 507).
+- Agent `StartTask` adds the torrent to exactly one client, picked from the `READY` clients with room (`readyClients`).
+  It checks before fetching the `.torrent` (with the webhook size, if any), then re-checks with the
+  exact size from the `.torrent`. No ready client returns `ErrNoReadyClients` (HTTP 503); no ready client with room
+  returns `ErrInsufficientStorage` (HTTP 507).
+- One ranking picks the client, shared with the scheduler: `stats.CompareClients` orders by `ClientStats.Score` (100,
+  +20 with no active downloads, else minus `calculateTorrentPenalty` per active torrent), then more `StorageHeadroom`
+  (nil is unlimited), then name. `max_replicas` counts agents, never clients.
 - The agent uploads the `.torrent` it fetched (`AddTorrentFromMemoryCtx`), never the URL: qbit only queues a URL add,
   so a failed second fetch would still count as success.
-- The add is best-effort across clients, like `SendWork` across nodes: the task succeeds if at least one client added
-  the torrent (the others are logged), and fails only when every client failed.
-- After adding, the agent re-announces in a goroutine.
+- A failed add falls back to the next client in rank order and stops at the first success; the task fails only when
+  every client failed. Once the task ctx is done it stops instead: a timed-out add may have gone through, and another
+  client would add the torrent twice.
+- After adding, the agent re-announces in a goroutine, on the client that took the torrent.
 - Timeouts nest so the agent answers first: agent `TaskTimeout` (60s, covers the client check, `.torrent` fetch and
   add) < server `TaskTimeout` (75s per agent) < server `WebhookTimeout` (100s per webhook) < autobrr's webhook timeout
   (120s). The agent's task ctx is the request ctx, so it stops when the server stops waiting. `.torrent` fetches retry 3
@@ -120,9 +126,9 @@ The task's `scheduler_type` picks the scheduler in `server.schedulerFor`: `least
    task (`checkLabels`: every task label must be present and equal on the node), with at least one `READY` client,
    and, when `size` is set, where at least one ready client has room (`hasRoomFor`). A node with no ready client is
    rejected with every client's reasons. Every rejected node gets a `NodeRejection` with reasons.
-2. `Score`: `LeastActive` gives base 100, +20 per client with zero active downloads, minus per-torrent penalties
-   weighted by remaining progress and ETA. Only `usableClients` count (ready, with room for `size`): the agent skips
-   the others, and an unreachable client reports zero downloads. `RoundRobin` scores every node 0.
+2. `Score`: `LeastActive` scores a node as its best usable client (`bestClient`: ready, with room for `size`, first
+   by `stats.CompareClients`), the client the agent will add to. Not a sum over clients: an extra idle client does
+   not lift a node. A node without usable clients scores `-Inf`. `RoundRobin` scores every node 0.
 3. `PickN`: take `task.MaxAllowedReplicas` nodes (default 1, capped at the candidate count). `LeastActive` sorts by
    score descending. `RoundRobin` walks nodes in name order starting after the last node it picked; the server keeps
    one shared `RoundRobin`, so the turn carries across tasks (in memory, reset on restart).

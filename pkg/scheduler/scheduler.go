@@ -14,7 +14,6 @@ import (
 	"github.com/autobrr/distribrr/pkg/stats"
 	"github.com/autobrr/distribrr/pkg/task"
 
-	"github.com/autobrr/go-qbittorrent"
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
@@ -101,7 +100,7 @@ func checkNode(ctx context.Context, t task.Task, n *node.Node) []string {
 		return []string{"could not fetch stats"}
 	}
 
-	// the agent only adds the torrent to its ready clients with room, so
+	// the agent adds the torrent to one of its ready clients with room, so
 	// the node needs one such client, not all of them
 	ready := readyClients(stat.ClientStats)
 	if len(ready) == 0 {
@@ -137,7 +136,7 @@ func readyClients(clients map[string]stats.ClientStats) map[string]stats.ClientS
 }
 
 // usableClients returns the ready clients with room for a torrent of size
-// bytes, the ones the agent adds it to.
+// bytes, the ones the agent picks from.
 func usableClients(clients map[string]stats.ClientStats, size uint64) map[string]stats.ClientStats {
 	usable := readyClients(clients)
 	maps.DeleteFunc(usable, func(_ string, c stats.ClientStats) bool {
@@ -189,58 +188,34 @@ func checkLabels(taskLabels map[string]string, nodeLabels map[string]string) boo
 	return true
 }
 
+// Score gives each node the score of the client the agent will add the
+// torrent to: its best usable client by stats.CompareClients.
 func (r *LeastActive) Score(ctx context.Context, t task.Task, nodes []*node.Node) map[string]float64 {
-	nodeScores := make(map[string]float64)
-	baseScore := 100.0    // Start with a high base score
-	noActiveBonus := 20.0 // Bonus for having no active downloads
+	nodeScores := make(map[string]float64, len(nodes))
 
 	for _, n := range nodes {
-		score := baseScore
-
-		// score only the clients the agent would add the torrent to
-		for _, clientStats := range usableClients(n.Stats().ClientStats, t.Size) {
-			if clientStats.ActiveDownloadsCount == 0 {
-				// Bonus for having no active downloads
-				score += noActiveBonus
-				continue
-			}
-
-			// Calculate penalties for each active download
-			for _, torrent := range clientStats.ActiveDownloads {
-				penalty := calculateTorrentPenalty(torrent)
-				score -= penalty
-			}
+		best, ok := bestClient(n.Stats().ClientStats, t.Size)
+		if !ok {
+			// candidate selection drops such nodes; rank one last if it slips through
+			nodeScores[n.Name] = math.Inf(-1)
+			continue
 		}
 
-		nodeScores[n.Name] = score
+		nodeScores[n.Name] = best.Score()
 	}
 
 	return nodeScores
 }
 
-// calculateTorrentPenalty determines the penalty for a single torrent based on its progress and ETA
-func calculateTorrentPenalty(torrent qbittorrent.Torrent) float64 {
-	const (
-		// 24 hours in seconds as max ETA
-		maxETASeconds  = 24 * 60 * 60
-		basePenalty    = 10.0
-		progressWeight = 0.7 // Weight for progress contribution
-		etaWeight      = 0.3 // Weight for ETA contribution
-	)
-
-	// Progress penalty (less penalty for higher progress)
-	// Progress is between 0 and 1 (0% to 100%)
-	progressPenalty := (1 - torrent.Progress) * progressWeight * basePenalty
-
-	// ETA penalty (more penalty for higher ETA)
-	etaPenalty := 0.0
-	if torrent.ETA > 0 {
-		// Normalize ETA (in seconds) against maxETASeconds
-		normalizedETA := math.Min(float64(torrent.ETA), float64(maxETASeconds)) / float64(maxETASeconds)
-		etaPenalty = normalizedETA * etaWeight * basePenalty
+// bestClient returns the usable client the agent picks for a torrent of size
+// bytes, and false when there is none.
+func bestClient(clients map[string]stats.ClientStats, size uint64) (stats.ClientStats, bool) {
+	usable := slices.Collect(maps.Values(usableClients(clients, size)))
+	if len(usable) == 0 {
+		return stats.ClientStats{}, false
 	}
 
-	return progressPenalty + etaPenalty
+	return slices.MinFunc(usable, stats.CompareClients), true
 }
 
 func (r *LeastActive) PickN(scores map[string]float64, candidates []*node.Node, number int) []*node.Node {
