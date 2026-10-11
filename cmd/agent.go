@@ -28,15 +28,14 @@ func CommandAgentRun() *cobra.Command {
 		SilenceUsage: true,
 	}
 
-	//cfg := config.New()
 	var configPath string
 
 	cfg := agent.NewConfig()
 
 	command.Flags().StringVar(&configPath, "config-file", "", "Path to config file")
-	command.Flags().StringVar(&cfg.Http.Host, "http-host", "", "HTTP Host. Default: localhost")
-	command.Flags().StringVar(&cfg.Http.Port, "http-port", "7430", "HTTP port. Default: 7422")
-	command.Flags().StringVar(&cfg.Http.Token, "http-api-token", "", "Api token")
+	command.Flags().StringVar(&cfg.Http.Host, "http-host", "", "HTTP host to listen on; empty listens on all interfaces")
+	command.Flags().StringVar(&cfg.Http.Port, "http-port", "7430", "HTTP port")
+	command.Flags().StringVar(&cfg.Http.Token, "http-api-token", "", "API token, see distribrr token generate")
 
 	command.RunE = func(cmd *cobra.Command, args []string) error {
 		if err := cfg.LoadFromFile(configPath); err != nil {

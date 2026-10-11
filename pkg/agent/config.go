@@ -3,6 +3,8 @@ package agent
 import (
 	"os"
 
+	"github.com/autobrr/distribrr/pkg/token"
+
 	"github.com/autobrr/go-qbittorrent"
 
 	"github.com/dustin/go-humanize"
@@ -92,8 +94,8 @@ func (c *Config) LoadFromFile(configPath string) error {
 
 // Validate checks the settings the agent cannot run without.
 func (c *Config) Validate() error {
-	if c.Http.Token == "" {
-		return errors.New("http.token must be set; refusing to start without an API token")
+	if err := token.Check(c.Http.Token); err != nil {
+		return errors.Wrap(err, "http.token")
 	}
 
 	for name, client := range c.Clients {

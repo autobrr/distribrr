@@ -33,17 +33,17 @@ func CommandServerRun() *cobra.Command {
 	cfg := server.NewConfig()
 
 	command.Flags().StringVar(&configPath, "config-file", "", "Path to config file")
-	command.Flags().StringVar(&cfg.Http.Host, "http-host", "", "HTTP Host. Default: localhost")
-	command.Flags().StringVar(&cfg.Http.Port, "http-port", "7422", "HTTP port. Default: 7422")
-	command.Flags().StringVar(&cfg.Http.Token, "http-api-token", "", "API token")
+	command.Flags().StringVar(&cfg.Http.Host, "http-host", "", "HTTP host to listen on; empty listens on all interfaces")
+	command.Flags().StringVar(&cfg.Http.Port, "http-port", "7422", "HTTP port")
+	command.Flags().StringVar(&cfg.Http.Token, "http-api-token", "", "API token, see distribrr token generate")
 
 	command.RunE = func(cmd *cobra.Command, args []string) error {
 		if err := cfg.LoadFromFile(configPath); err != nil {
 			return errors.Wrapf(err, "could not load config from file: %s", configPath)
 		}
 
-		if cfg.Http.Token == "" {
-			return errors.New("http.token must be set; refusing to start without an API token")
+		if err := cfg.Validate(); err != nil {
+			return errors.Wrap(err, "invalid config")
 		}
 
 		app := server.NewService(cfg)

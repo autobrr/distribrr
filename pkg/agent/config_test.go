@@ -42,7 +42,10 @@ func TestConfig_Validate(t *testing.T) {
 	cfg := NewConfig()
 	assert.Error(t, cfg.Validate(), "missing http token")
 
-	cfg.Http.Token = "secret"
+	cfg.Http.Token = "MY_SECRET_TOKEN"
+	assert.Error(t, cfg.Validate(), "example http token")
+
+	cfg.Http.Token = "agent-test-token-0123"
 	assert.NoError(t, cfg.Validate())
 
 	cfg.Clients["qbit"] = &QbitClient{}

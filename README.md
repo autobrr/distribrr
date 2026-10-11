@@ -20,6 +20,16 @@ You need to run one server that manages agents.
 
     distribrr server run
 
+### Tokens
+
+The server and every agent need an API token (`http.token`), at least 16 characters. They refuse to start without
+one. Generate one with:
+
+    distribrr token generate
+
+The server's token goes in autobrr's webhook URL and in every agent's `manager.token`. Each agent's own `http.token`
+can be different; the agent sends it when it registers.
+
 ## Agent
 
 The agent runs on remote servers alongside the torrent clients and has access to the filesystem.
