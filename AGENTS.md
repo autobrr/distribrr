@@ -68,7 +68,9 @@ restart on both; a bad file is logged and the old config kept.
   is `READY` as soon as it registers (the token callback reached it).
 - `NodeCheckTimeout` (5s) bounds one health check round and, per task, fetching labels and stats from the candidates.
   Both check nodes concurrently, so an agent that stopped answering costs one timeout, not one per node.
-- An agent registers once: it does not re-join if the server later loses its node, until the agent restarts.
+- A joined agent asks `GET /api/v1/node/{name}` every `RegisterInterval` (10s) and re-joins on 404, e.g. after the
+  server restarted from a config without the node. A `REMOVED` node is still known, so a node taken out of the server
+  config stays out until the agent restarts.
 
 ### Agent (worker): `pkg/agent`, default port 7430
 - Runs next to qBittorrent with access to its storage paths. `Register()` retries every 10s until `Join` succeeds.

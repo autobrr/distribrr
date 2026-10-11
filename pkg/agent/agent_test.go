@@ -720,11 +720,16 @@ func TestService_Serve_deregistersOnShutdown(t *testing.T) {
 			return
 		}
 
-		m.Lock()
-		calls = append(calls, r.URL.Path)
-		m.Unlock()
+		// registration checks may land before shutdown, only count the posts
+		if r.Method == http.MethodPost {
+			m.Lock()
+			calls = append(calls, r.URL.Path)
+			m.Unlock()
+		}
 
 		switch r.URL.Path {
+		case "/api/v1/node/agent1":
+			w.WriteHeader(http.StatusOK)
 		case "/api/v1/node/register":
 			w.WriteHeader(http.StatusCreated)
 		case "/api/v1/node/deregister":

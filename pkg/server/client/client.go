@@ -12,6 +12,8 @@ import (
 
 	"github.com/autobrr/distribrr/pkg/middleware"
 	"github.com/autobrr/distribrr/pkg/version"
+
+	"github.com/pkg/errors"
 )
 
 const DefaultClientTimeout = 15 * time.Second
@@ -107,6 +109,41 @@ func (c *Client) DeregisterRequest(ctx context.Context, data DeregisterRequest) 
 	}
 
 	return nil
+}
+
+// ErrNodeNotFound is returned by CheckNode when the server does not know the node.
+var ErrNodeNotFound = errors.New("node not found")
+
+// CheckNode asks the server whether it knows the node named nodeName. It
+// returns ErrNodeNotFound when it does not; a REMOVED node is still known.
+func (c *Client) CheckNode(ctx context.Context, nodeName string) error {
+	reqUrl, err := c.buildUrl("/node/"+nodeName, nil)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
+	if err != nil {
+		return err
+	}
+
+	c.setHeaders(ctx, req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return errors.Wrap(ErrNodeNotFound, errorBody(resp))
+	default:
+		return statusError(resp)
+	}
 }
 
 // statusError reads the error the server sent with an unexpected status.

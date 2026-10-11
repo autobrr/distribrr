@@ -45,8 +45,9 @@ const (
 type Service struct {
 	// Timings. NewService sets the defaults; change them before calling Serve.
 
-	// RegisterInterval is how often Register retries joining the server, and
-	// how long a single join attempt may take.
+	// RegisterInterval is how often Register retries joining the server, how
+	// long a single join attempt may take, and how often a joined agent checks
+	// that the server still knows it.
 	RegisterInterval time.Duration
 	// DirUsageInterval is how often the storage paths with a maxUsage rule are
 	// walked. Walking a large torrent directory is slow, so it runs in the
@@ -86,6 +87,9 @@ type Service struct {
 type controlNode struct {
 	Addr  string
 	Token string
+	// NodeName is the name the agent joined with, the hostname when
+	// agent.nodeName is empty.
+	NodeName string
 }
 
 func NewService(cfg *Config) *Service {
@@ -169,6 +173,7 @@ func (s *Service) Serve(ctx context.Context, ln net.Listener, reload <-chan stru
 
 	// register agent with server
 	go s.Register(ctx)
+	go s.watchRegistration(ctx)
 
 	// keep dir usage for maxUsage rules measured in the background
 	s.reloadM.Lock()
@@ -419,6 +424,70 @@ func (s *Service) registerAgentWithServer(ctx context.Context, tickerDuration ti
 	return nil
 }
 
+// watchRegistration checks every RegisterInterval that the server still
+// knows the joined agent, and joins again when it does not, e.g. after the
+// server restarted from a config file without the node. A node the server
+// keeps as REMOVED, because it was taken out of the server config, stays
+// removed.
+func (s *Service) watchRegistration(ctx context.Context) {
+	ticker := time.NewTicker(s.RegisterInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if s.lostRegistration(ctx) {
+				go s.Register(ctx)
+			}
+		}
+	}
+}
+
+// lostRegistration reports whether the server no longer knows the joined
+// agent, and if so marks the agent as not joined. It is false when the agent
+// has not joined, or the server could not be asked.
+func (s *Service) lostRegistration(ctx context.Context) bool {
+	s.m.RLock()
+	cn := s.controlNode
+	sc := s.serverClient
+	s.m.RUnlock()
+
+	// not joined yet, Register is still trying
+	if cn == nil || sc == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, s.RegisterInterval)
+	defer cancel()
+
+	err := sc.CheckNode(ctx, cn.NodeName)
+	if err == nil {
+		return false
+	}
+
+	if !errors.Is(err, serverclient.ErrNodeNotFound) {
+		// the server being down is the health checks' business, not a reason to join again
+		log.Debug().Err(err).Msg("could not check registration with server")
+		return false
+	}
+
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	// a reload may have started a new join meanwhile
+	if s.controlNode != cn {
+		return false
+	}
+
+	s.controlNode = nil
+
+	log.Warn().Msgf("server does not know node %s anymore, joining again", cn.NodeName)
+
+	return true
+}
+
 // sameRegistration reports whether a and b register the agent with the server
 // the same way.
 func sameRegistration(a, b *Config) bool {
@@ -499,8 +568,9 @@ func (s *Service) Join(ctx context.Context, addr string, token string, agent Age
 	// set controlNode
 	s.m.Lock()
 	s.controlNode = &controlNode{
-		Addr:  addr,
-		Token: token,
+		Addr:     addr,
+		Token:    token,
+		NodeName: nodeName,
 	}
 	s.m.Unlock()
 
