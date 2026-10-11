@@ -226,6 +226,49 @@ func TestTask_qbitRejectsAdd(t *testing.T) {
 		assert.Empty(t, badQbit.Added())
 		assert.Len(t, goodQbit.Added(), 1)
 	})
+
+	t.Run("one of two clients on an agent fails is still added", func(t *testing.T) {
+		e := newEnv(t)
+
+		badQbit, goodQbit := fakeqbit.New(t), fakeqbit.New(t)
+		badQbit.FailAdd(true)
+
+		a := e.AddAgent(t, testharness.AgentSpec{
+			Name: "node1",
+			Clients: []testharness.ClientSpec{
+				{Name: "bad", Qbit: badQbit},
+				{Name: "good", Qbit: goodQbit},
+			},
+		})
+		e.WaitReady(t, a)
+
+		status, body := e.Webhook(t, e.release("PartialAdd.Release-GRP", 10*mb))
+		require.Equal(t, http.StatusCreated, status, body)
+		assert.Empty(t, badQbit.Added())
+		assert.Len(t, goodQbit.Added(), 1)
+	})
+
+	t.Run("every client on an agent fails", func(t *testing.T) {
+		e := newEnv(t)
+
+		q1, q2 := fakeqbit.New(t), fakeqbit.New(t)
+		q1.FailAdd(true)
+		q2.FailAdd(true)
+
+		a := e.AddAgent(t, testharness.AgentSpec{
+			Name: "node1",
+			Clients: []testharness.ClientSpec{
+				{Name: "q1", Qbit: q1},
+				{Name: "q2", Qbit: q2},
+			},
+		})
+		e.WaitReady(t, a)
+
+		status, body := e.Webhook(t, e.release("AllFail.Release-GRP", 10*mb))
+		assert.Equal(t, http.StatusBadGateway, status)
+		assert.Contains(t, body, "node1")
+		assert.Zero(t, totalAdded(q1, q2))
+	})
 }
 
 func TestSchedulerType(t *testing.T) {
