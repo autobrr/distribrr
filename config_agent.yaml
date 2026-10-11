@@ -1,7 +1,7 @@
 http:
   host: 0.0.0.0
   port: 7430
-  token: MY_SECRET_TOKEN
+  token: "" # this agent's own token; generate one with: distribrr token generate
 
 agent:
   nodeName: test-node1
@@ -12,7 +12,7 @@ agent:
 
 manager:
   addr: http://localhost:7422
-  token: MY_SECRET_TOKEN
+  token: "" # the server's http.token
 
 clients:
   qbittorrent:

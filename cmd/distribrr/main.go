@@ -36,6 +36,7 @@ func main() {
 
 	rootCmd.AddCommand(cmd.CommandServer())
 	rootCmd.AddCommand(cmd.CommandAgent())
+	rootCmd.AddCommand(cmd.CommandToken())
 
 	rootCmd.AddCommand(CmdVersion())
 	rootCmd.AddCommand(CmdUpdate())

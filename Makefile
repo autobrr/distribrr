@@ -5,12 +5,9 @@ GIT_TAG := $(shell git tag --points-at HEAD 2> /dev/null | head -n 1)
 
 GO ?= go
 RM ?= rm
-GOFLAGS ?= "-s -w -extldflags=-static -X version.Commit=$(GIT_COMMIT) -X version.Version=dev"
+GOFLAGS ?= "-s -w -extldflags=-static -X github.com/autobrr/distribrr/pkg/version.Commit=$(GIT_COMMIT) -X github.com/autobrr/distribrr/pkg/version.Version=dev"
 PREFIX ?= /usr/local
 BINDIR ?= bin
-
-GIT_COMMIT := $(shell git rev-parse HEAD 2> /dev/null)
-GIT_TAG := $(shell git tag --points-at HEAD 2> /dev/null | head -n 1)
 
 all: clean build
 

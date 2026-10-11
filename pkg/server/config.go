@@ -3,6 +3,8 @@ package server
 import (
 	"os"
 
+	"github.com/autobrr/distribrr/pkg/token"
+
 	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/file"
@@ -46,6 +48,15 @@ func (c *Config) Defaults() {
 		Token: "",
 	}
 	c.Nodes = make([]*AgentNode, 0)
+}
+
+// Validate checks the settings the server cannot run without.
+func (c *Config) Validate() error {
+	if err := token.Check(c.Http.Token); err != nil {
+		return errors.Wrap(err, "http.token")
+	}
+
+	return nil
 }
 
 func (c *Config) LoadFromFile(configPath string) error {

@@ -37,7 +37,7 @@ import (
 
 const (
 	// Token is the server API token, used by autobrr and agents alike.
-	Token = "server-token"
+	Token = "server-test-token-0123"
 
 	// WaitTimeout bounds every Wait* helper.
 	WaitTimeout = 5 * time.Second
@@ -383,7 +383,7 @@ func (h *Harness) AddAgent(t testing.TB, spec AgentSpec) *Agent {
 		h:          h,
 		t:          t,
 		spec:       spec,
-		token:      spec.Name + "-token",
+		token:      spec.Name + "-agent-test-token",
 		configFile: filepath.Join(t.TempDir(), "config_agent.yaml"),
 		hang:       newGate(),
 	}

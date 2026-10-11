@@ -52,6 +52,17 @@ func TestConfig_WriteToFile_error(t *testing.T) {
 	assert.Error(t, cfg.WriteToFile())
 }
 
+func TestConfig_Validate(t *testing.T) {
+	cfg := NewConfig()
+	assert.ErrorContains(t, cfg.Validate(), "http.token: must be set")
+
+	cfg.Http.Token = "MY_SECRET_TOKEN"
+	assert.ErrorContains(t, cfg.Validate(), "http.token: is the example token")
+
+	cfg.Http.Token = "server-test-token-0123"
+	assert.NoError(t, cfg.Validate())
+}
+
 // fakeAgent serves the agent's verify endpoint and accepts token.
 func fakeAgent(t *testing.T, token string) *httptest.Server {
 	t.Helper()

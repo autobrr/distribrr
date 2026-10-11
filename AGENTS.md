@@ -38,6 +38,7 @@ go test ./...              # all tests
 go test ./pkg/scheduler/ -run TestLeastActive_Score -v   # single test
 go test -race ./internal/testharness/scenarios/   # end-to-end scenarios: in-process server + agents, fake qbit + tracker (~2s)
 go vet ./...
+distribrr token generate   # random API token for http.token
 nilaway ./...              # only configured linter; CI runs it continue-on-error, not yet clean
 ```
 
@@ -120,6 +121,10 @@ The task's `scheduler_type` picks the scheduler in `server.schedulerFor`: `least
    one shared `RoundRobin`, so the turn carries across tasks (in memory, reset on restart).
 
 ### Auth and config
+
+- `pkg/token.Check` refuses an empty token, the old sample `MY_SECRET_TOKEN` and anything under 16 characters; both
+  roles check their `http.token` at startup (`Config.Validate`). The agent's `manager.token` is not checked; the server
+  rejects it at register if it does not match.
 - One shared token. `pkg/middleware.IsAuthenticated` checks, in order, `X-API-Token`, the raw `Authorization` header (no `Bearer` scheme), then `?apikey=`. The first one present decides; no credential gives 401. Comparison is plain `!=`, not constant-time.
 - Config is koanf + YAML (`pkg/server/config.go`, `pkg/agent/config.go`). koanf matches keys to struct fields by name, so the `yaml:` tags only matter where the server marshals its config back to disk.
 - Some keys in `config_agent.yaml` are read by no code: `type`, `paths`, `tier`, `maxTotalDownloads`, `maxTotalTorrents`.

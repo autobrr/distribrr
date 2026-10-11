@@ -26,7 +26,7 @@ builds:
     main: ./cmd/distribrr/main.go
     binary: distribrr
     ldflags:
-      - -s -w -X github.com/autobrr/distribrr/pkg/version.Version=v{{.Version}} -X github.com/autobrr/distribrr/pkg/version.Commit={{.Commit}} -X github.com/autobrr/distribrr/pkg/version.BuildDate={{.Date}} -X github.com/autobrr/distribrr/pkg/version.BuiltBy=goreleaser'
+      - -s -w -X github.com/autobrr/distribrr/pkg/version.Version=v{{.Version}} -X github.com/autobrr/distribrr/pkg/version.Commit={{.Commit}} -X github.com/autobrr/distribrr/pkg/version.BuildDate={{.Date}} -X github.com/autobrr/distribrr/pkg/version.BuiltBy=goreleaser
 
 archives:
   - id: distribrr

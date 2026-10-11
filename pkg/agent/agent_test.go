@@ -314,7 +314,7 @@ func TestAPIServer_tasks_insufficientStorage(t *testing.T) {
 	const mb = 1_000_000
 
 	s := newRoomService(t, 500*mb, 0, false)
-	s.cfg.Http.Token = "secret"
+	s.cfg.Http.Token = "agent-test-token-0123"
 
 	te := task.NewEvent()
 	// the size check runs before the .torrent is fetched, so this is never dialed
@@ -325,7 +325,7 @@ func TestAPIServer_tasks_insufficientStorage(t *testing.T) {
 	assert.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/", bytes.NewReader(body))
-	req.Header.Set("X-API-Token", "secret")
+	req.Header.Set("X-API-Token", "agent-test-token-0123")
 
 	rec := httptest.NewRecorder()
 	NewAPIServer(s.cfg, s).Handler().ServeHTTP(rec, req)
@@ -352,7 +352,7 @@ func newReloadService(t *testing.T, content string) (*Service, string) {
 func clientConfig(name string, extra string) string {
 	return `
 http:
-  token: secret
+  token: agent-test-token-0123
 clients:
   ` + name + `:
     host: http://127.0.0.1:1
@@ -386,7 +386,7 @@ func TestService_reload_invalidKeepsConfig(t *testing.T) {
 	}{
 		{name: "unparsable yaml", write: func(t *testing.T, path string) { writeFile(t, path, "clients: [unclosed") }},
 		{name: "fails validation", write: func(t *testing.T, path string) {
-			writeFile(t, path, "http:\n  token: secret\nclients:\n  b:\n    user: admin\n")
+			writeFile(t, path, "http:\n  token: agent-test-token-0123\nclients:\n  b:\n    user: admin\n")
 		}},
 		{name: "file removed", write: func(t *testing.T, path string) { require.NoError(t, os.Remove(path)) }},
 	}
@@ -415,7 +415,7 @@ func TestService_reload_keepsHttp(t *testing.T) {
 http:
   host: 127.0.0.1
   port: 7430
-  token: secret
+  token: agent-test-token-0123
 agent:
   labels:
     disktype: hdd
@@ -425,14 +425,14 @@ agent:
 http:
   host: 0.0.0.0
   port: 9999
-  token: other
+  token: other-agent-test-token
 agent:
   labels:
     disktype: ssd
 `)
 	require.NoError(t, s.reload(t.Context()))
 
-	assert.Equal(t, Http{Host: "127.0.0.1", Port: "7430", Token: "secret"}, s.config().Http)
+	assert.Equal(t, Http{Host: "127.0.0.1", Port: "7430", Token: "agent-test-token-0123"}, s.config().Http)
 	// the rest of the file still applies
 	assert.Equal(t, map[string]string{"disktype": "ssd"}, s.GetLabels())
 }
@@ -550,7 +550,7 @@ func TestService_reload_rejoins(t *testing.T) {
 	agentConfig := func(nodeName, disktype string) string {
 		return `
 http:
-  token: secret
+  token: agent-test-token-0123
 agent:
   nodeName: ` + nodeName + `
   clientAddr: http://agent:7430
@@ -558,7 +558,7 @@ agent:
     disktype: ` + disktype + `
 manager:
   addr: ` + manager.URL + `
-  token: secret
+  token: agent-test-token-0123
 `
 	}
 
