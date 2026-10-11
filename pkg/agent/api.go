@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	mw "github.com/autobrr/distribrr/pkg/middleware"
+	"github.com/autobrr/distribrr/pkg/sharedhttp"
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/go-chi/chi/v5"
@@ -29,9 +30,7 @@ func NewAPIServer(cfg *Config, svc *Service) *APIServer {
 		service: svc,
 	}
 
-	s.server = &http.Server{
-		Handler: s.Handler(),
-	}
+	s.server = sharedhttp.NewServer(s.Handler())
 
 	return s
 }
@@ -63,24 +62,22 @@ func (s *APIServer) Handler() http.Handler {
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		render.PlainText(w, r, "OK")
-		render.Status(r, http.StatusOK)
 	})
 
 	r.Route("/api/v1/", func(r chi.Router) {
 		r.Route("/healthz", func(r chi.Router) {
 			r.Get("/liveness", func(w http.ResponseWriter, r *http.Request) {
 				render.PlainText(w, r, "OK")
-				render.Status(r, http.StatusOK)
 			})
 
 			r.Get("/readiness", func(w http.ResponseWriter, r *http.Request) {
 				if err := s.service.Healthcheck(r.Context()); err != nil {
 					render.Status(r, http.StatusFailedDependency)
+					render.JSON(w, r, map[string]string{"error": err.Error()})
 					return
 				}
 
 				render.PlainText(w, r, "OK")
-				render.Status(r, http.StatusOK)
 			})
 		})
 
@@ -89,7 +86,7 @@ func (s *APIServer) Handler() http.Handler {
 			r.Use(mw.IsAuthenticated(s.token))
 
 			r.Get("/verify", func(w http.ResponseWriter, r *http.Request) {
-				render.Status(r, http.StatusOK)
+				w.WriteHeader(http.StatusOK)
 			})
 
 			r.Route("/tasks", func(r chi.Router) {
@@ -128,23 +125,13 @@ func (s *APIServer) Handler() http.Handler {
 
 			r.Route("/stats", func(r chi.Router) {
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-					s := s.service.GetStatsFull(r.Context())
-					if s == nil {
-						render.Status(r, http.StatusInternalServerError)
-						return
-					}
-
-					render.Status(r, http.StatusOK)
-					render.JSON(w, r, s)
+					render.JSON(w, r, s.service.GetStatsFull(r.Context()))
 				})
 			})
 
 			r.Route("/labels", func(r chi.Router) {
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-					label := s.service.GetLabels()
-
-					render.Status(r, http.StatusOK)
-					render.JSON(w, r, label)
+					render.JSON(w, r, s.service.GetLabels())
 				})
 			})
 		})

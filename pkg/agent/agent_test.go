@@ -334,6 +334,51 @@ func TestAPIServer_tasks_insufficientStorage(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "no client has room for 1.0 GB")
 }
 
+func TestAPIServer_endpoints(t *testing.T) {
+	s := newRoomService(t, 500_000_000, 0, false)
+	s.cfg.Http.Token = "agent-test-token-0123"
+	s.cfg.Agent.Labels = map[string]string{"region": "eu"}
+
+	handler := NewAPIServer(s.cfg, s).Handler()
+
+	get := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Token", "agent-test-token-0123")
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		return rec
+	}
+
+	t.Run("readiness", func(t *testing.T) {
+		rec := get("/api/v1/healthz/readiness")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "OK", rec.Body.String())
+	})
+
+	t.Run("verify", func(t *testing.T) {
+		rec := get("/api/v1/verify")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Body.String())
+	})
+
+	t.Run("labels", func(t *testing.T) {
+		rec := get("/api/v1/labels/")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.JSONEq(t, `{"region":"eu"}`, rec.Body.String())
+	})
+
+	t.Run("stats", func(t *testing.T) {
+		rec := get("/api/v1/stats/")
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var st stats.Stats
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
+		assert.Contains(t, st.ClientStats, "qbit")
+	})
+}
+
 // newReloadService writes content as the agent config file and returns a
 // service built from it, the way cmd/agent.go does.
 func newReloadService(t *testing.T, content string) (*Service, string) {

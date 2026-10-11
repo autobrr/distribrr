@@ -8,6 +8,7 @@ import (
 
 	mw "github.com/autobrr/distribrr/pkg/middleware"
 	"github.com/autobrr/distribrr/pkg/scheduler"
+	"github.com/autobrr/distribrr/pkg/sharedhttp"
 	"github.com/autobrr/distribrr/pkg/task"
 
 	"github.com/go-chi/chi/v5"
@@ -30,9 +31,7 @@ func NewAPIServer(cfg *Config, svc *Service) *APIServer {
 		service: svc,
 	}
 
-	s.server = &http.Server{
-		Handler: s.Handler(),
-	}
+	s.server = sharedhttp.NewServer(s.Handler())
 
 	return s
 }
@@ -64,24 +63,16 @@ func (s *APIServer) Handler() http.Handler {
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		render.PlainText(w, r, "OK")
-		render.Status(r, http.StatusOK)
 	})
 
 	r.Route("/api/v1/", func(r chi.Router) {
 		r.Route("/healthz", func(r chi.Router) {
 			r.Get("/liveness", func(w http.ResponseWriter, r *http.Request) {
 				render.PlainText(w, r, "OK")
-				render.Status(r, http.StatusOK)
 			})
 
 			r.Get("/readiness", func(w http.ResponseWriter, r *http.Request) {
-				//if err := s.service.Healthcheck(r.Context()); err != nil {
-				//	render.Status(r, http.StatusFailedDependency)
-				//	return
-				//}
-
 				render.PlainText(w, r, "OK")
-				render.Status(r, http.StatusOK)
 			})
 		})
 
