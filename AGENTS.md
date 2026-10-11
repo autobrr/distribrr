@@ -126,6 +126,8 @@ The task's `scheduler_type` picks the scheduler in `server.schedulerFor`: `least
 
 ### Auth and config
 
+- Server and agents speak plain HTTP; TLS comes from a reverse proxy or a private network (README "Network security").
+  Both clients use Go's default transport, so `https://` addresses work with system-trusted certificates.
 - `pkg/token.Check` refuses an empty token, the old sample `MY_SECRET_TOKEN` and anything under 16 characters; both
   roles check their `http.token` at startup (`Config.Validate`). The agent's `manager.token` is not checked; the server
   rejects it at register if it does not match.
