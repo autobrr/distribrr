@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -421,7 +422,7 @@ func TestRoundRobin_PickN(t *testing.T) {
 	})
 }
 
-// Only the clients the agent would add to count towards the score: a client
+// Only the clients the agent picks from count towards the score: a client
 // that is not ready, or has no room for the torrent, is skipped by the agent.
 func TestLeastActive_Score_onlyUsableClients(t *testing.T) {
 	idle := stats.ClientStats{Name: "idle", Status: stats.ClientStatusReady}
@@ -461,8 +462,8 @@ func TestLeastActive_Score_onlyUsableClients(t *testing.T) {
 	}{
 		{name: "unreachable client earns no idle bonus", node: nodeWith("n", idle, unreachable), want: 120},
 		{name: "not ready client's downloads are not penalized", node: nodeWith("n", idle, full), want: 120},
-		{name: "client without room earns no idle bonus", size: 10 * 1000 * 1000, node: nodeWith("n", idle, noRoom), want: 120},
-		{name: "client without room counts when size is unknown", node: nodeWith("n", idle, noRoom), want: 140},
+		{name: "client without room earns no idle bonus", size: 10 * 1000 * 1000, node: nodeWith("n", busy, noRoom), want: busyScore},
+		{name: "client without room counts when size is unknown", node: nodeWith("n", busy, noRoom), want: 120},
 		{name: "unreachable clients do not lift a busy node", node: nodeWith("n", busy, unreachable), want: busyScore},
 	}
 
@@ -472,4 +473,63 @@ func TestLeastActive_Score_onlyUsableClients(t *testing.T) {
 			assert.Equal(t, tt.want, got["n"])
 		})
 	}
+}
+
+// The agent adds the torrent to one client, its best usable one, so a node
+// scores as that client, not as the sum of its clients.
+func TestLeastActive_Score_bestClient(t *testing.T) {
+	idle := stats.ClientStats{Name: "idle", Status: stats.ClientStatusReady}
+	idle2 := stats.ClientStats{Name: "idle2", Status: stats.ClientStatusReady}
+	busy := stats.ClientStats{
+		Name:                 "busy",
+		Status:               stats.ClientStatusReady,
+		ActiveDownloadsCount: 1,
+		ActiveDownloads:      []qbittorrent.Torrent{{Progress: 0.1, ETA: 3600}},
+	}
+	nearlyDone := stats.ClientStats{
+		Name:                 "nearlydone",
+		Status:               stats.ClientStatusReady,
+		ActiveDownloadsCount: 1,
+		ActiveDownloads:      []qbittorrent.Torrent{{Progress: 0.9, ETA: 60}},
+	}
+	unreachable := stats.ClientStats{Name: "unreachable", Status: stats.ClientStatusNotReady, Reasons: []stats.NotReadyReason{stats.ReasonClientUnreachable}}
+
+	nodeWith := func(clients ...stats.ClientStats) *node.Node {
+		cs := make(map[string]stats.ClientStats, len(clients))
+		for _, c := range clients {
+			cs[c.Name] = c
+		}
+		return testNode("n", node.StatusReady, map[string]string{}, stats.Stats{ClientStats: cs})
+	}
+
+	tests := []struct {
+		name string
+		node *node.Node
+		want float64
+	}{
+		{name: "two idle clients score as one", node: nodeWith(idle, idle2), want: 120},
+		{name: "idle client is not dragged down by a busy one", node: nodeWith(idle, busy), want: 120},
+		{name: "busy clients score as the least busy", node: nodeWith(busy, nearlyDone), want: nearlyDone.Score()},
+		{name: "no usable client ranks last", node: nodeWith(unreachable), want: math.Inf(-1)},
+		{name: "no clients ranks last", node: nodeWith(), want: math.Inf(-1)},
+	}
+
+	r := &LeastActive{}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.Score(t.Context(), task.Task{}, []*node.Node{tt.node})
+			assert.Equal(t, tt.want, got["n"])
+		})
+	}
+
+	t.Run("an extra idle client does not lift a node", func(t *testing.T) {
+		// a sum over clients would rank "two" first, though either node adds
+		// the torrent to one idle client
+		one := testNode("one", node.StatusReady, map[string]string{}, stats.Stats{ClientStats: map[string]stats.ClientStats{"idle": idle}})
+		two := testNode("two", node.StatusReady, map[string]string{}, stats.Stats{ClientStats: map[string]stats.ClientStats{"idle": idle, "idle2": idle2}})
+
+		scores := r.Score(t.Context(), task.Task{}, []*node.Node{one, two})
+		assert.Equal(t, scores["one"], scores["two"])
+	})
 }

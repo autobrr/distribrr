@@ -267,6 +267,8 @@ func TestStorage(t *testing.T) {
 	}
 }
 
+// Both roomy and unlimited are idle and have room; unlimited wins the tie on
+// headroom, since no storage rules counts as unlimited.
 func TestMultiClientAgent_addsOnlyToClientsWithRoom(t *testing.T) {
 	t.Parallel()
 
@@ -300,7 +302,7 @@ func TestMultiClientAgent_addsOnlyToClientsWithRoom(t *testing.T) {
 			require.Equal(t, http.StatusCreated, status, body)
 
 			assert.Empty(t, small.Added())
-			assert.Len(t, roomy.Added(), 1)
+			assert.Empty(t, roomy.Added())
 			assert.Len(t, unlimited.Added(), 1)
 		})
 	}

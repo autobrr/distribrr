@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,7 +26,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"golang.org/x/sync/errgroup"
 )
 
 // shutdownTimeout bounds how long deregistering and in-flight requests get on shutdown.
@@ -582,12 +580,12 @@ func (s *Service) Healthcheck(ctx context.Context) error {
 	return nil
 }
 
-// StartTask adds the torrent to every ready client with room. It succeeds if at
-// least one client added it, and fails only when every client failed. It gives
-// up when ctx is done, e.g. the server stopped waiting, or after TaskTimeout.
+// StartTask adds the torrent to one client: the best ready client with room by
+// stats.CompareClients, the same ranking the scheduler scores this node by. If
+// the add fails it tries the next client, and fails only when every client
+// failed. It gives up when ctx is done, e.g. the server stopped waiting, or
+// after TaskTimeout.
 func (s *Service) StartTask(ctx context.Context, t task.Task) error {
-	sender := errgroup.Group{}
-
 	ctx, cancel := context.WithTimeout(ctx, s.TaskTimeout)
 	defer cancel()
 
@@ -626,65 +624,62 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 		return err
 	}
 
-	var added atomic.Int64
+	slices.SortFunc(clients, func(a, b readyClient) int {
+		return stats.CompareClients(a.stats, b.stats)
+	})
 
-	for _, client := range clients {
-		sender.Go(func() error {
-			l.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
+	var failed []string
 
-			// add the file we already fetched: a URL add only queues the
-			// fetch in qbit, so a failed second fetch would go unnoticed.
-			// go-qbittorrent writes to the options map, so every client gets
-			// its own copy
-			if _, err := client.Client.AddTorrentFromMemoryCtx(ctx, rel.File, maps.Clone(opts)); err != nil {
-				l.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, client.Name)
-				return err
+	for _, c := range clients {
+		l.Debug().Msgf("add torrent %s to client %s", t.Name, c.client.Name)
+
+		// add the file we already fetched: a URL add only queues the fetch in
+		// qbit, so a failed second fetch would go unnoticed. go-qbittorrent
+		// writes to the options map, so every attempt gets its own copy
+		if _, err := c.client.Client.AddTorrentFromMemoryCtx(ctx, rel.File, maps.Clone(opts)); err != nil {
+			l.Error().Err(err).Msgf("error adding torrent from file %s to qbit: %s", t.Name, c.client.Name)
+
+			// a timed out add may still have gone through, so another client
+			// could end up with the torrent too
+			if ctx.Err() != nil {
+				return errors.Wrapf(err, "could not add torrent to client %s", c.client.Name)
 			}
 
-			// handle reannounce
-			if rel.Hash != "" {
-				go func(clientName string, hash string, name string) {
-					l.Debug().Msgf("trying to re-announce torrent: %s %s", hash, name)
+			failed = append(failed, fmt.Sprintf("%s: %v", c.client.Name, err))
+			continue
+		}
 
-					// reannounce
-					options := qbittorrent.ReannounceOptions{
-						Interval:        s.ReannounceInterval,
-						MaxAttempts:     s.ReannounceMaxAttempts,
-						DeleteOnFailure: false,
-					}
+		l.Debug().Msgf("successfully added torrent %s to client %s", t.Name, c.client.Name)
 
-					if err := client.Client.ReannounceTorrentWithRetry(s.baseContext(), hash, &options); err != nil {
-						l.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", hash, clientName)
-						return
-					}
+		if rel.Hash != "" {
+			go s.reannounce(l, c.client, rel.Hash, rel.Name)
+		}
 
-					l.Debug().Msgf("successfully re-announced torrent: %s %s", hash, name)
-				}(client.Name, rel.Hash, rel.Name)
-			}
-
-			l.Debug().Msgf("successfully added torrent: %s", t.Name)
-
-			added.Add(1)
-
-			return nil
-		})
+		return nil
 	}
 
-	// wait for every client: the torrent is on this node as long as one of
-	// them took it, and failing the task would make the server try elsewhere
-	err = sender.Wait()
+	l.Error().Msg("error adding torrent: all clients failed")
 
-	ok := added.Load()
-	if ok == 0 {
-		l.Error().Err(err).Msg("error adding torrent: all clients failed")
-		return err
+	return errors.Errorf("could not add torrent to any client (%s)", strings.Join(failed, ", "))
+}
+
+// reannounce re-announces a torrent just added to client until a tracker
+// answers. It outlives the task, so it runs on the Serve ctx.
+func (s *Service) reannounce(l *zerolog.Logger, client *QbitClient, hash string, name string) {
+	l.Debug().Msgf("trying to re-announce torrent: %s %s", hash, name)
+
+	options := qbittorrent.ReannounceOptions{
+		Interval:        s.ReannounceInterval,
+		MaxAttempts:     s.ReannounceMaxAttempts,
+		DeleteOnFailure: false,
 	}
 
-	if err != nil {
-		l.Warn().Err(err).Msgf("added torrent %s to %d/%d clients; some clients failed", t.Name, ok, len(clients))
+	if err := client.Client.ReannounceTorrentWithRetry(s.baseContext(), hash, &options); err != nil {
+		l.Error().Err(err).Msgf("error re-announcing torrent %s on qbit: %s", hash, client.Name)
+		return
 	}
 
-	return nil
+	l.Debug().Msgf("successfully re-announced torrent: %s %s", hash, name)
 }
 
 // ErrInsufficientStorage is returned by StartTask when no ready client has
@@ -695,12 +690,18 @@ var ErrInsufficientStorage = errors.New("insufficient storage")
 // are at their max active downloads, out of disk or unreachable.
 var ErrNoReadyClients = errors.New("no ready clients")
 
+// readyClient is a client that can take a torrent, with the stats that say so.
+type readyClient struct {
+	client *QbitClient
+	stats  stats.ClientStats
+}
+
 // readyClients returns the clients that are READY and, for a known size, whose
 // storage rules have room for a torrent of size bytes. It returns
 // ErrNoReadyClients when no client is ready and ErrInsufficientStorage when no
 // ready client has room.
-func (s *Service) readyClients(ctx context.Context, size uint64) ([]*QbitClient, error) {
-	var ready []*QbitClient
+func (s *Service) readyClients(ctx context.Context, size uint64) ([]readyClient, error) {
+	var ready []readyClient
 	var notReady []string
 	var noRoom []string
 
@@ -718,7 +719,7 @@ func (s *Service) readyClients(ctx context.Context, size uint64) ([]*QbitClient,
 			continue
 		}
 
-		ready = append(ready, client)
+		ready = append(ready, readyClient{client: client, stats: ct})
 	}
 
 	if len(ready) > 0 {
