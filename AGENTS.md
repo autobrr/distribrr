@@ -93,6 +93,8 @@ restart on both; a bad file is logged and the old config kept.
   `ErrInsufficientStorage` (HTTP 507).
 - The agent uploads the `.torrent` it fetched (`AddTorrentFromMemoryCtx`), never the URL: qbit only queues a URL add,
   so a failed second fetch would still count as success.
+- The add is best-effort across clients, like `SendWork` across nodes: the task succeeds if at least one client added
+  the torrent (the others are logged), and fails only when every client failed.
 - After adding, the agent re-announces in a goroutine.
 - Timeouts nest so the agent answers first: agent `TaskTimeout` (60s, covers the client check, `.torrent` fetch and
   add) < server `TaskTimeout` (75s per agent) < server `WebhookTimeout` (100s per webhook) < autobrr's webhook timeout

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -511,8 +512,9 @@ func (s *Service) Healthcheck(ctx context.Context) error {
 	return nil
 }
 
-// StartTask adds the torrent to every ready client with room. It gives up when
-// ctx is done, e.g. the server stopped waiting, or after TaskTimeout.
+// StartTask adds the torrent to every ready client with room. It succeeds if at
+// least one client added it, and fails only when every client failed. It gives
+// up when ctx is done, e.g. the server stopped waiting, or after TaskTimeout.
 func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 	sender := errgroup.Group{}
 
@@ -554,6 +556,8 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 		return err
 	}
 
+	var added atomic.Int64
+
 	for _, client := range clients {
 		sender.Go(func() error {
 			l.Debug().Msgf("add torrent %s to client %s", t.Name, client.Name)
@@ -588,17 +592,26 @@ func (s *Service) StartTask(ctx context.Context, t task.Task) error {
 				}(client.Name, rel.Hash, rel.Name)
 			}
 
-			//downloads++
-
 			l.Debug().Msgf("successfully added torrent: %s", t.Name)
+
+			added.Add(1)
 
 			return nil
 		})
 	}
 
-	if err := sender.Wait(); err != nil {
-		l.Error().Err(err).Msg("error adding torrent to client")
+	// wait for every client: the torrent is on this node as long as one of
+	// them took it, and failing the task would make the server try elsewhere
+	err = sender.Wait()
+
+	ok := added.Load()
+	if ok == 0 {
+		l.Error().Err(err).Msg("error adding torrent: all clients failed")
 		return err
+	}
+
+	if err != nil {
+		l.Warn().Err(err).Msgf("added torrent %s to %d/%d clients; some clients failed", t.Name, ok, len(clients))
 	}
 
 	return nil
