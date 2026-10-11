@@ -52,6 +52,65 @@ func TestConfig_WriteToFile_error(t *testing.T) {
 	assert.Error(t, cfg.WriteToFile())
 }
 
+func Test_writeFileAtomic(t *testing.T) {
+	t.Run("replaces the file and keeps its mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("old"), 0600))
+
+		require.NoError(t, writeFileAtomic(path, []byte("new")))
+
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, "new", string(data))
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+
+		// no temp file left behind
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		assert.Len(t, entries, 1)
+	})
+
+	t.Run("writes through a symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real.yaml")
+		link := filepath.Join(dir, "config.yaml")
+		require.NoError(t, os.WriteFile(target, []byte("old"), 0644))
+		require.NoError(t, os.Symlink(target, link))
+
+		require.NoError(t, writeFileAtomic(link, []byte("new")))
+
+		info, err := os.Lstat(link)
+		require.NoError(t, err)
+		assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink, "the link stays a link")
+
+		data, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Equal(t, "new", string(data))
+	})
+
+	t.Run("writes in place when the dir is read-only", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores dir permissions")
+		}
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("old"), 0644))
+		require.NoError(t, os.Chmod(dir, 0555))
+		t.Cleanup(func() { os.Chmod(dir, 0755) })
+
+		require.NoError(t, writeFileAtomic(path, []byte("new")))
+
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, "new", string(data))
+	})
+}
+
 func TestConfig_Validate(t *testing.T) {
 	cfg := NewConfig()
 	assert.ErrorContains(t, cfg.Validate(), "http.token: must be set")

@@ -58,7 +58,8 @@ restart on both; a bad file is logged and the old config kept.
 - `SendWork` -> `selectWorkers` -> `node.StartTask` on each chosen agent concurrently. Best-effort: the task counts as scheduled if at least one agent accepts it. Otherwise autobrr gets 502 with a per-node rejection summary (`summarizeRejections`).
 - Agents self-register at `POST /api/v1/node/register`. `OnRegister` verifies the agent's token by calling back to it,
   then **saves the node to the server's own config file** before updating memory. The server config is mutable state,
-  not just input.
+  not just input. `writeFileAtomic` replaces it through a temp file and a rename, and writes in place when it cannot
+  (the file is a bind mount, or its dir is read-only).
 - Nodes are identified by name: re-registering updates the existing node's addr, token and labels (and revives a
   `REMOVED` node) instead of adding a duplicate.
 - Node labels are saved in the server config (`nodes[].labels`) on register, so they survive restarts. Nodes without
