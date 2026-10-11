@@ -98,6 +98,8 @@ restart on both; a bad file is logged and the old config kept.
   add) < server `TaskTimeout` (75s per agent) < server `WebhookTimeout` (100s per webhook) < autobrr's webhook timeout
   (120s). The agent's task ctx is the request ctx, so it stops when the server stops waiting. `.torrent` fetches retry 3
   times, 1s apart, 20s each.
+- Both HTTP servers come from `sharedhttp.NewServer`: `ReadHeaderTimeout` 10s, `ReadTimeout` 30s, `IdleTimeout` 2m.
+  There is no `WriteTimeout` on purpose: it would cut off webhooks and tasks that wait on the deadlines above.
 
 ### The two HTTP clients (directionality is the confusing part)
 - `pkg/agent/client.go` (package `agent`, type `Client`) is used **by the server to call an agent**. `pkg/node.Node` wraps one; `Node` is the server-side handle for a worker.
