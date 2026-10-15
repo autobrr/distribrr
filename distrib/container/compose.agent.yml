@@ -1,0 +1,43 @@
+# distribrr agent next to the qBittorrent it adds torrents to. See the Docker
+# section in the README.
+#
+# Mount the download storage into the agent at the same paths as the
+# rules.storage entries in ./distribrr/config.yaml: the agent measures free
+# space and usage on its own filesystem.
+services:
+  distribrr-agent:
+    image: ghcr.io/autobrr/distribrr:main
+    container_name: distribrr-agent
+    command: agent run --config-file /config/config.yaml
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+    ports:
+      - "7430:7430"
+    volumes:
+      - ./distribrr:/config
+      - /data/torrents:/data/torrents:ro
+    depends_on:
+      - qbittorrent
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://localhost:7430/api/v1/healthz/liveness" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=8080
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - ./qbittorrent:/config
+      - /data/torrents:/data/torrents

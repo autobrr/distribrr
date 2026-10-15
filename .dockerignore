@@ -7,7 +7,7 @@ config.yaml
 config_*.yaml
 .goreleaser.yml
 Dockerfile
-Dockerfile.ci
+distrib/
 docker-compose.yml
 README.md
 CODE_OF_CONDUCT.md

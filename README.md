@@ -38,6 +38,91 @@ The agent runs on remote servers alongside the torrent clients and has access to
 
     distribrr agent run
 
+## Docker
+
+The image is `ghcr.io/autobrr/distribrr`. Release tags are published as `vX.Y.Z`; `main` follows the main branch. The
+entrypoint is the `distribrr` binary, so the compose `command` picks the role. There is no default config path: pass
+`--config-file`.
+
+Example compose files are in [`distrib/container`](distrib/container):
+
+- [`compose.server.yml`](distrib/container/compose.server.yml): the server
+- [`compose.agent.yml`](distrib/container/compose.agent.yml): an agent with qBittorrent next to it
+
+### Server
+
+Put the config in `./config/config.yaml` next to the compose file:
+
+```yaml
+http:
+  host: 0.0.0.0
+  port: 7422
+  token: "" # distribrr token generate
+```
+
+    docker compose -f compose.server.yml up -d
+
+The server saves agents to this file when they register. Mount the directory, not the file, and keep it writable: the
+server replaces the file through a temp file in the same directory.
+
+### Agent
+
+Put the config in `./distribrr/config.yaml` next to the compose file:
+
+```yaml
+http:
+  host: 0.0.0.0
+  port: 7430
+  token: "" # distribrr token generate
+
+agent:
+  nodeName: agent1
+  clientAddr: http://agent1.example.com:7430 # where the server reaches this agent
+  labels:
+    region: eu
+
+manager:
+  addr: http://distribrr.example.com:7422
+  token: "" # the server's http.token
+
+clients:
+  qbittorrent:
+    host: http://qbittorrent:8080 # the compose service name
+    user: admin
+    pass: "" # the WebUI password set in qBittorrent
+    rules:
+      storage:
+        - path: /data/torrents
+          minFree: 50GB
+      torrents:
+        maxActiveDownloads: 3
+```
+
+    docker compose -f compose.agent.yml up -d
+
+- `agent.clientAddr` is the address the server calls, not a compose service name, unless the server runs in the same
+  compose project. Publish port 7430 and use the host's address.
+- The agent reads disk space from its own filesystem. Mount the download storage into the agent at the same path as
+  each `rules.storage` entry. Read-only is enough. Without the mount, `minFree` measures the container's root
+  filesystem and `maxUsage` an empty directory.
+- `docker compose down` and `stop` send SIGTERM; the agent deregisters before it exits and joins again on the next
+  start.
+- `docker kill -s HUP distribrr-agent` reloads `clients`, `agent` and `manager` without a restart. `http` changes need
+  `docker compose restart`. The same works for the server, which reloads `nodes`.
+
+### Everything on one host
+
+When autobrr, the server and an agent share a compose project, put them in one file and use service names:
+
+- the agent's `agent.clientAddr`: `http://distribrr-agent:7430`
+- the agent's `manager.addr`: `http://distribrr:7422`
+- the autobrr webhook endpoint: `http://distribrr:7422/api/v1/tasks?apikey=...`
+
+Drop the `ports:` of the server and the agent then: nothing outside the compose network needs to reach them.
+
+Across hosts, the ports are plain HTTP. See [Network security](#network-security) before publishing them on a public
+interface; to bind a published port to one address, use e.g. `"10.0.0.2:7430:7430"`.
+
 ## Logging
 
 Both roles log to stdout. Set `LOG_LEVEL` to `trace`, `debug`, `info` (default), `warn` or `error`.
