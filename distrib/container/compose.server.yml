@@ -1,0 +1,22 @@
+# distribrr server. See the Docker section in the README.
+#
+# ./config/config.yaml needs at least http.token. The server writes registered
+# nodes back to that file, so mount the directory, not the file, and keep it
+# writable.
+services:
+  distribrr:
+    image: ghcr.io/autobrr/distribrr:main
+    container_name: distribrr
+    command: server run --config-file /config/config.yaml
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+    ports:
+      - "7422:7422"
+    volumes:
+      - ./config:/config
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://localhost:7422/api/v1/healthz/liveness" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
